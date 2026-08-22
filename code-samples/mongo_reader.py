@@ -87,6 +87,41 @@ class MongoReader:
     def close(self):
         self.client.close()
 
+    def extract_to_volume(self, colecao: str, volume: str, quantidade: int,
+                          filtro: dict | None = None, projecao: dict | None = None,
+                          batch_size: int = 5_000) -> list[str]:
+        
+        ## Extrai N documentos da coleção e grava 1 arquivo JSON por documento no Volume.
+        ## Nome: {database}-{colecao}-{yyyymmddTHHMMSS}-{segundos}-{nanosegundos}.json
+
+        volume = volume.rstrip("/")
+        os.makedirs(volume, exist_ok=True)
+
+        cursor = self.client[self.database][colecao].find(
+            filter=filtro or {}, projection=projecao, batch_size=batch_size
+        ).limit(quantidade)
+
+        caminhos = []
+        for doc in cursor:
+            ns = time.time_ns()
+            segundos, nanos = divmod(ns, 1_000_000_000)
+            carimbo = datetime.datetime.fromtimestamp(segundos).strftime("%Y%m%dT%H%M%S")
+
+            nome = f"{self.database}-{colecao}-{carimbo}-{segundos}-{nanos:09d}.json"
+            caminho = os.path.join(volume, nome)
+
+            sufixo = 0
+            while os.path.exists(caminho):
+                sufixo += 1
+                caminho = os.path.join(volume, nome.replace(".json", f"-{sufixo}.json"))
+
+            with open(caminho, "w", encoding="utf-8") as arquivo:
+                json.dump(doc, arquivo, default=self._encode, ensure_ascii=False)
+
+            caminhos.append(caminho)
+
+        return caminhos               
+
 # COMMAND ----------
 
 df = MongoReader().read(colecao="movies") 
@@ -96,3 +131,12 @@ df.display()
 
 df = MongoReader().read(colecao="movies", infer=True) 
 df.display()
+
+# COMMAND ----------
+
+reader = MongoReader()
+arquivos = reader.extract_to_volume(
+    colecao="movies",
+    volume="/Volumes/meu_catalog/landing/files/",
+    quantidade=20,
+)
