@@ -42,6 +42,11 @@ try:
 except Exception as _exc:  # pragma: no cover
     print("aviso: os.chdir falhou:", _exc)
 
+# Descarrega mflix_ingest.* do cache -> apos um `git pull` o codigo novo e relido
+# sem precisar reiniciar o Python. Faca `%run ./_bootstrap` ANTES de importar.
+for _m in [m for m in list(sys.modules) if m == "mflix_ingest" or m.startswith("mflix_ingest.")]:
+    del sys.modules[_m]
+
 CONFIG_PATH = os.path.join(REPO_ROOT, "config", "pipeline_config.yaml")
 COLLECTIONS_PATH = os.path.join(REPO_ROOT, "config", "collections.json")
 
