@@ -56,12 +56,21 @@ print(f"secret {SCOPE}/{KEY} gravada com sucesso.")
 
 # COMMAND ----------
 
-# MAGIC %md ## Verificacao (nao imprime a URI inteira)
+# MAGIC %md ## Verificacao (nunca imprime nenhum trecho da URI)
+# MAGIC
+# MAGIC O redaction automatico do Databricks (substitui o valor por `[REDACTED]`
+# MAGIC na saida da celula) so reconhece a string **inteira** do secret — um
+# MAGIC slice como `val[:10]` foge dele e vaza um pedaco real da credencial no
+# MAGIC notebook. Por isso a verificacao abaixo so imprime booleanos/contagem,
+# MAGIC nunca um caractere do valor.
 
 # COMMAND ----------
 
 val = dbutils.secrets.get(scope=SCOPE, key=KEY)
-print("comprimento:", len(val), "| prefixo:", val[:10] + "...")
+print(
+    "comprimento:", len(val),
+    "| formato valido:", val.startswith(("mongodb://", "mongodb+srv://")),
+)
 
 # COMMAND ----------
 

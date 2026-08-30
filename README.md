@@ -124,11 +124,11 @@ Toda a demais configuração está em `config/` — **nada hardcoded** (R1).
 |---|---|---|
 | **R1** | Pipeline genérica e parametrizada, OOP, config externalizada | `config/*` + `src/mflix_ingest/config.py`; extract/load/control separados em módulos; `pipeline.run_pipeline` roda as 6 coleções com o mesmo código |
 | **R2** | ≥4 boas práticas de recurso, justificadas | cursor em lotes, projection/pushdown, sem `collect/toPandas/list`, partição no destino, pooling, retry+backoff — tabela em [ARQUITETURA §5](docs/ARQUITETURA.md#5-boas-práticas-de-recurso-r2--onde-estão-no-código) |
-| **R3** | Full + incremental com watermark persistida + idempotência | `full` (users/theaters/sessions/embedded_movies) via MERGE por `_source_id`; `incremental` (comments/movies) via append + `bronze.ingestion_watermark`. O motor `batch` lê só o arquivo `.jsonl` **daquela execução** (`<run_id>` no nome) → re-run não reprocessa; ver [DECISOES D3/D4](docs/DECISOES_TECNICAS.md) |
+| **R3** | Full + incremental com watermark persistida + idempotência | `full` (users/theaters/sessions/embedded_movies) via MERGE por `_source_id` **com lista de colunas explícita** (não `UpdateAll`, ver [D10](docs/DECISOES_TECNICAS.md#d10-merge-com-lista-explícita-de-colunas-nunca-updateallinsertall)); `incremental` (comments/movies) via append + `bronze.ingestion_watermark`. O motor `batch` lê só o arquivo `.jsonl` **daquela execução** (`<run_id>` no nome) → re-run não reprocessa; ver [DECISOES D3/D4](docs/DECISOES_TECNICAS.md) |
 | **R4** | Colunas de rastreabilidade em toda Bronze | `_ingestion_id`, `_ingestion_timestamp`, `_source_path`, `_load_type`, `_ingestion_date` (+ `_source_id`, `body_json`, `_rescued_data`, `_source_hash`, `_source_file`) — DDL em `control.bronze_ddl` |
 | **R5** | `control_ingestion_log` | `bronze.control_ingestion_log`, escrita a cada execução por `control.ControlManager.log_run`; schema com todos os campos pedidos + extras |
 | **R6** | Bronze Delta, append-only, fiel à origem, particionada, nomenclatura | Delta particionada por `_ingestion_date`; documento preservado integralmente em `body_json` (STRING); arquivo JSONL imutável na landing; padrão `catalog.schema.tabela` |
-| **R7** | Schema drift + registros inválidos | Bronze guarda o documento como **STRING JSON** (`body_json`) — schema drift é um não-problema (é só texto); campos/registros que o reader não interpreta → `_rescued_data`; sem `_source_id` → `<collection>_quarentena`. Tipagem só na Silver (`from_json`). Ver [DECISOES D2](docs/DECISOES_TECNICAS.md) |
+| **R7** | Schema drift + registros inválidos | Bronze guarda o documento como **STRING JSON** (`body_json`) — schema drift é um não-problema (é só texto); campos/registros que o reader não interpreta → `_rescued_data`; sem `_source_id` → `<collection>_quarentena`. Tipagem só na Silver (`from_json`/`get_json_object`), com limpeza + `try_cast` para dado numérico sujo sob ANSI mode em vez de descartar (ver [D2](docs/DECISOES_TECNICAS.md#d2-documento-inteiro-em-body_json-string-como-forma-canônica-da-bronze) e [D11](docs/DECISOES_TECNICAS.md#d11-ansi-mode-e-try_cast-com-limpeza-na-tipagem-da-silver-r7)) |
 | **R8** | Reconciliação e qualidade + limiar documentado | `quality.Reconciler`: origem×destino (execução e acumulada), % nulos na chave, duplicidade no lote; limiares em `collections.json` / [ARQUITETURA §4](docs/ARQUITETURA.md#4-reconciliação-r8--limiares) |
 
 ---
@@ -187,4 +187,12 @@ carregamento de config, validação do data contract.
 
 Lista completa em [`docs/DECISOES_TECNICAS.md §D9`](docs/DECISOES_TECNICAS.md#d9-limitações-conhecidas).
 Destaques: CDC não implementado (origem standalone); `movies` sem `lastupdated`
-só entra em carga full; `body_json` no modo `inferred` é re-serialização canônica.
+só entra em carga full; `body_json` é sempre uma re-serialização canônica (a
+fidelidade byte-a-byte fica no `.jsonl` da landing, não na Bronze).
+
+Duas decisões adicionais valem leitura — nasceram de bugs reais encontrados
+rodando a pipeline em produção (Databricks Serverless, ANSI mode):
+[`§D10` — MERGE com colunas explícitas](docs/DECISOES_TECNICAS.md#d10-merge-com-lista-explícita-de-colunas-nunca-updateallinsertall)
+(defende contra schema drift na tabela **alvo**) e
+[`§D11` — `try_cast`/limpeza na Silver](docs/DECISOES_TECNICAS.md#d11-ansi-mode-e-try_cast-com-limpeza-na-tipagem-da-silver-r7)
+(trata dado sujo real do `sample_mflix` sob ANSI mode sem descartar registro).

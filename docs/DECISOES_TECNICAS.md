@@ -12,8 +12,8 @@ tem **dois motores** (`config: autoloader.engine`):
 
 | Motor | Como | Quando |
 |---|---|---|
-| `batch` (**padrão**) | `spark.read.text()` dos arquivos **daquela execução** (identificados pelo `<run_id>` no nome) → `VARIANT` → append/MERGE | pipeline principal (`ingestion_job`) |
-| `autoloader` | `readStream` `cloudFiles` + `checkpointLocation` + `schemaLocation` persistido + `trigger(availableNow)` | `bronze_job` (reprocessamento / bônus +5) |
+| `batch` (**padrão**) | `spark.read.json()` dos arquivos **daquela execução** (identificados pelo `<run_id>` no nome) → re-serializado em `body_json` STRING (`to_json(struct(*campos))`) → append/MERGE | pipeline principal (`ingestion_job`) |
+| `autoloader` | `readStream` `cloudFiles` + `checkpointLocation` + `schemaLocation` persistido + `trigger(availableNow)` → mesmo `body_json` STRING | `bronze_job` (reprocessamento / bônus +5) |
 
 **Por que a landing zone (comum aos dois):**
 - Desacopla extração de carga. A Bronze pode ser reconstruída sem tocar na origem.
@@ -27,8 +27,12 @@ tem **dois motores** (`config: autoloader.engine`):
 - `batch` lê exatamente os arquivos da execução (`ext.files`), sem checkpoint:
   a idempotência vem da watermark (incremental não re-extrai) e do `MERGE` por
   `_source_id` (full). Roda as 6 coleções em ~1–2 min.
-- `spark.read.text` preserva `body_json` **byte-a-byte** (1 linha = 1 doc), melhor
-  fidelidade que o `singleVariantColumn` do Auto Loader.
+- A fidelidade **byte-a-byte** à origem vive no arquivo `.jsonl` da landing
+  (`json.dumps(doc, default=bson_default)`, nunca reescrito). `body_json` na
+  Bronze é uma **re-serialização canônica**: o `spark.read.json()` infere um
+  schema por lote e `to_json(struct(...))` reconstrói o JSON a partir dele —
+  mesmo conteúdo, mas ordem de chaves/formatação podem diferir do arquivo
+  original. Ver D9.
 
 **Por que manter o `autoloader`:**
 - Atende literalmente o bônus **+5** ("consumir com Auto Loader / `readStream` com
@@ -172,12 +176,77 @@ As "3 execuções obrigatórias" são 3 `run_id` distintos. Facilita responder
 - **`movies.lastupdated`**: documentos criados **sem** o campo após a 1ª carga
   não são capturados pela incremental (filtro `$exists:true`). Mitigação:
   `force_full=true` periódico em `movies`.
-- **`body_json` no modo `inferred`** é uma re-serialização canônica (ordem de
-  chaves pode diferir da origem); a fidelidade byte-a-byte fica no arquivo da
-  landing. No modo `single_variant` (padrão) isso não se aplica.
+- **`body_json` é sempre uma re-serialização canônica** (`to_json(struct(...))`
+  a partir do schema inferido pelo `spark.read.json()`/Auto Loader) — ordem de
+  chaves e formatação podem diferir do documento original. A fidelidade
+  byte-a-byte fica garantida no arquivo `.jsonl` imutável da landing, não em
+  `body_json`. Não existe um modo alternativo "byte-perfeito" na Bronze desde
+  que o `VARIANT` foi removido (ver D2).
 - **Reconciliação acumulada com MERGE**: para coleções full, `COUNT(*)` da Bronze
   é `≤` à soma do control log (upserts não somam) — tratado como `accumulated_ok`
   quando `bronze >= soma` é falso apenas se `bronze < soma`.
 - Sem *file notification* no Auto Loader (usa directory listing) — suficiente
   para o volume do trabalho; para produção com muitos arquivos, ligar
   `cloudFiles.useNotifications`.
+
+---
+
+## D10. MERGE com lista explícita de colunas, nunca `UpdateAll`/`InsertAll`
+
+**Escolha:** `loader._merge` monta `assign = {c: F.col(f"s.{c}") for c in BRONZE_COLUMNS}`
+e usa `whenMatchedUpdate(set=assign)` / `whenNotMatchedInsert(values=assign)` — nunca
+`whenMatchedUpdateAll()` / `whenNotMatchedInsertAll()`.
+
+**Por quê:** `UpdateAll`/`InsertAll` expandem `*` pelas colunas do **alvo** (a tabela
+Delta já existente). Se a tabela física tiver uma coluna que o DataFrame de
+origem não tem — por exemplo `body_variant`, sobra de um DDL anterior à remoção
+do `VARIANT` (D2), ou qualquer coluna que uma migração futura adicione sem
+recriar a tabela — o Spark não consegue resolver a expressão e o `MERGE` inteiro
+falha (`[DELTA_MERGE_UNRESOLVED_EXPRESSION]`), mesmo a Bronze estando com dado
+saudável. Aconteceu na prática: uma tabela `bronze.users` criada antes da
+remoção do `VARIANT` quebrava o `MERGE` até o Git Folder ser re-sincronizado e o
+schema recriado.
+
+Com a lista de colunas explícita (`BRONZE_COLUMNS`, a mesma ordem do DDL em
+`control.bronze_ddl`), colunas extra/legadas do alvo são simplesmente ignoradas
+— o `MERGE` sempre grava exatamente as 10 colunas de rastreabilidade, não
+importa o que sobrou na tabela física. Ainda existe um `try/except` de
+segurança: se mesmo assim o `MERGE` falhar, o loader cai para `overwrite` do
+snapshot (log `WARNING`, nunca perde a execução).
+
+**Risco residual:** `control.set_watermark` (tabela de watermark) ainda usa
+`whenMatchedUpdateAll()`/`whenNotMatchedInsertAll()`, porque a origem desse
+`MERGE` é sempre construída com o `WATERMARK_SCHEMA` fixo do próprio código
+(nunca varia com o dado do Mongo) — hoje seguro. Se `WATERMARK_SCHEMA` for
+alterado no futuro sem recriar `bronze.ingestion_watermark`, o mesmo problema
+se repete ali.
+
+---
+
+## D11. ANSI mode e try_cast com limpeza na tipagem da Silver (R7)
+
+**Escolha:** as colunas numéricas de `silver.movies` (`year`, `runtime`,
+`imdb.*`, `tomatoes.*`, `awards.*`, `num_mflix_comments`) passam por um helper
+(`silver._jc`) que extrai o primeiro token numérico do valor bruto via
+`regexp_extract` **antes** de castar, em vez de um `.cast(tipo)` direto.
+
+**Por quê:** o Databricks roda em **ANSI SQL mode**. Sob ANSI, `CAST` de uma
+string que não representa um número válido **lança exceção**
+(`[CAST_INVALID_INPUT]`) em vez de virar `NULL` como no Spark legado — e um
+`CAST` inválido em uma única linha derruba a escrita da tabela inteira.
+`sample_mflix` é schemaless por natureza (R7) e tem pelo menos um documento
+real com `movies.year = '1981è'` (provável range de ano com o traço corrompido
+por encoding, ex. um `–` mal decodificado). Um `try_cast` simples resolveria o
+crash, mas devolveria `NULL` — perdendo um dado recuperável.
+
+Em vez disso, `_jc` limpa antes de castar: `regexp_extract(valor, '-?\d+\.?\d*')`
+extrai o primeiro número dentro da string suja (`'1981è'` → `'1981'` → `1981`),
+e só cai em `NULL` se não houver nenhum dígito no valor (nada a recuperar). Os
+campos de timestamp (`released`, `comments.date`) usam `try_to_timestamp`
+(helper `_jt`) pela mesma razão — nesses o dado de origem já chega limpo
+(ISO 8601 via `bson_default`/`.isoformat()`), então o `try_` é rede de
+segurança, não limpeza ativa.
+
+**Coerência com R7:** o documento bruto nunca é alterado — `body_json`
+continua com `'1981è'` intacto; só a coluna **tipada** da Silver é que reflete
+o valor limpo (ou `NULL` quando irrecuperável). Nenhum registro é descartado.

@@ -159,7 +159,7 @@ Impacto na Silver: a Silver tipa com get_json_object / from_json campo a campo;
 | `movies` | incremental | `lastupdated` (string) | ~21k docs; string `YYYY-MM-DD HH:MM:SS.nnnnnnnnn` de largura fixa → `$gt` lexicográfico. `fullplot`/`poster` fora da projection. Docs sem `lastupdated` só entram na 1ª carga. |
 | `comments` | incremental | `date` (ISODate) | maior volume (~50k); `date` é ISODate nativo → incremental confiável. Coleção das 3 evidências. |
 | `users` | full | — | dimensão ~185; `password` fora da projection. MERGE por `_source_id`. |
-| `theaters` | full | — | ~1.5k; GeoJSON aninhado preservado no VARIANT. |
+| `theaters` | full | — | ~1.5k; GeoJSON aninhado preservado íntegro dentro do `body_json` (STRING). |
 | `sessions` | full | — | pode estar vazia → `allow_empty=true` (log SUCCESS, `qtd_lida_origem=0`). `jwt` fora da projection. |
 | `embedded_movies` | full | — | ~3.5k; `plot_embedding` (~12KB/doc) **obrigatoriamente** fora da projection (R2/memória). |
 

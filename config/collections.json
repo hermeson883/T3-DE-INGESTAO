@@ -44,7 +44,7 @@
     "batch_size": 1000,
     "expected_count_min": 1000,
     "reconciliation_threshold_pct": 0.0,
-    "notes": "GeoJSON aninhado (location.geo.coordinates = array de floats) — preservado integro dentro do VARIANT."
+    "notes": "GeoJSON aninhado (location.geo.coordinates = array de floats) — preservado integro dentro do body_json (STRING)."
   },
 
   "sessions": {
