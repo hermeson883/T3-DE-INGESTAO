@@ -305,12 +305,9 @@ class BronzeLoader:
     ) -> DataFrame:
         out = (
             df
-            .withColumn("_source_id", F.expr("try_cast(body_variant:_id as string)"))
-            .withColumn(
-                "_source_id",
-                F.coalesce(F.col("_source_id"),
-                           F.expr("try_cast(body_variant['_id']['$oid'] as string)")),
-            )
+            # _id vem serializado como string simples (bson_default). VARIANT usa
+            # sintaxe de path com ':' — colchetes nao funcionam em VARIANT.
+            .withColumn("_source_id", F.expr("body_variant:_id::string"))
             .withColumn("_source_hash", F.sha2(F.coalesce(F.col("body_json"), F.lit("")), 256))
             .withColumn("_ingestion_id", F.lit(run_id))
             .withColumn("_ingestion_timestamp", F.lit(ingestion_ts).cast("timestamp"))
@@ -324,17 +321,28 @@ class BronzeLoader:
         return out.select(*BRONZE_COLUMNS)
 
     def _append(self, df: DataFrame, table: str) -> None:
-        (df.write.format("delta").mode("append")
-         .partitionBy(self.bronze.partition_by)
-         .saveAsTable(table))
+        # tabela ja criada particionada pelo DDL -> nao repassa partitionBy
+        df.write.format("delta").mode("append").saveAsTable(table)
 
     def _merge(self, df: DataFrame, table: str) -> None:
+        """Upsert por _source_id. Se o MERGE falhar (ex.: VARIANT + updateAll em
+        runtime antigo), cai para overwrite do snapshot completo — idempotente
+        do mesmo jeito para cargas full."""
         from delta.tables import DeltaTable
 
-        (
-            DeltaTable.forName(self.spark, table).alias("t")
-            .merge(df.alias("s"), "t._source_id = s._source_id")
-            .whenMatchedUpdateAll()
-            .whenNotMatchedInsertAll()
-            .execute()
-        )
+        try:
+            (
+                DeltaTable.forName(self.spark, table).alias("t")
+                .merge(df.alias("s"), "t._source_id = s._source_id")
+                .whenMatchedUpdateAll()
+                .whenNotMatchedInsertAll()
+                .execute()
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("MERGE em %s falhou (%s) — fallback: overwrite snapshot", table, exc)
+            (
+                df.dropDuplicates(["_source_id"])
+                .write.format("delta").mode("overwrite")
+                .option("overwriteSchema", "false")
+                .saveAsTable(table)
+            )
