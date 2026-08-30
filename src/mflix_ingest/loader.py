@@ -139,21 +139,22 @@ class BronzeLoader:
             .json(files)
             .withColumn("_source_file", F.col("_metadata.file_path"))
         )
-        enriched = self._shape(raw, run_id, ingestion_ts, source_path_tag, spec.load_mode).persist()
-        try:
-            good = enriched.where(F.col("_source_id").isNotNull())
-            bad = enriched.where(F.col("_source_id").isNull())
-            n_bad = bad.count()
+        # Serverless nao suporta persist/cache de DataFrame
+        # ([NOT_SUPPORTED_WITH_SERVERLESS] PERSIST TABLE) — o plano e recomputado
+        # a cada acao. Custo baixo: a origem e o(s) .jsonl da propria execucao.
+        enriched = self._shape(raw, run_id, ingestion_ts, source_path_tag, spec.load_mode)
+        good = enriched.where(F.col("_source_id").isNotNull())
+        bad = enriched.where(F.col("_source_id").isNull())
 
-            if use_merge:
-                self._merge(good, target_table)
-            else:
-                self._append(good, target_table)
-            if n_bad:
-                self._append(bad, quarantine_table)
-                _log.warning("[%s] %d registro(s) sem _id -> quarentena", collection, n_bad)
-        finally:
-            enriched.unpersist()
+        if use_merge:
+            self._merge(good, target_table)
+        else:
+            self._append(good, target_table)
+
+        n_bad = bad.count()
+        if n_bad:
+            self._append(bad, quarantine_table)
+            _log.warning("[%s] %d registro(s) sem _id -> quarentena", collection, n_bad)
 
         written = self.spark.table(target_table).where(F.col("_ingestion_id") == run_id).count()
         _log.info("[%s] bronze (batch): %d gravados / %d quarentena", collection, written, n_bad)
@@ -191,19 +192,17 @@ class BronzeLoader:
         stats = {"batches": 0}
 
         def process_batch(bdf: DataFrame, batch_id: int) -> None:
-            enriched = self._shape(bdf, run_id, ingestion_ts, source_path_tag, spec.load_mode).persist()
-            try:
-                good = enriched.where(F.col("_source_id").isNotNull())
-                bad = enriched.where(F.col("_source_id").isNull())
-                if write_mode == "merge":
-                    self._merge(good, target_table)
-                else:
-                    self._append(good, target_table)
-                if bad.count():
-                    self._append(bad, quarantine_table)
-                stats["batches"] += 1
-            finally:
-                enriched.unpersist()
+            # sem persist(): nao suportado em Serverless
+            enriched = self._shape(bdf, run_id, ingestion_ts, source_path_tag, spec.load_mode)
+            good = enriched.where(F.col("_source_id").isNotNull())
+            bad = enriched.where(F.col("_source_id").isNull())
+            if write_mode == "merge":
+                self._merge(good, target_table)
+            else:
+                self._append(good, target_table)
+            if bad.count():
+                self._append(bad, quarantine_table)
+            stats["batches"] += 1
 
         query = (
             raw.writeStream
