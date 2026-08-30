@@ -25,6 +25,28 @@ def _j(path: str):
     return F.get_json_object(F.col("body_json"), f"$.{path}")
 
 
+def _jc(path: str, type_name: str):
+    """Extrai o primeiro token numerico do valor bruto e so entao aplica o cast.
+
+    O Databricks roda em ANSI mode: `.cast(...)` direto estourava
+    [CAST_INVALID_INPUT] sempre que a origem tinha um valor sujo (ex.: `year`
+    = '1981è' em sample_mflix.movies — provavel range de ano com dash
+    corrompido por encoding). Em vez de jogar o registro pra NULL, limpamos:
+    `regexp_extract` pega o primeiro numero (`-?\\d+\\.?\\d*`) dentro da string
+    e SO ISSO vai pro cast — '1981è' -> '1981', ' 42 ' -> '42'. Se nao houver
+    nenhum digito, vira NULL (nao tem o que recuperar; R7: o bruto continua
+    intacto em `body_json`).
+    """
+    token = F.regexp_extract(_j(path), r"-?\d+\.?\d*", 0)
+    cleaned = F.when(token == "", F.lit(None)).otherwise(token)
+    return cleaned.cast(type_name)
+
+
+def _jt(path: str):
+    """try_to_timestamp(get_json_object(...)) — mesma razao do `_jc` acima."""
+    return F.expr(f"try_to_timestamp(get_json_object(body_json, '$.{path}'))")
+
+
 class SilverBuilder:
     def __init__(self, spark: SparkSession, cfg: PipelineConfig):
         self.spark = spark
@@ -45,22 +67,22 @@ class SilverBuilder:
         movies = base.select(
             F.col("_source_id"),
             _j("title").alias("title"),
-            _j("year").cast("int").alias("year"),
+            _jc("year", "int").alias("year"),
             _j("rated").alias("rated"),
-            _j("runtime").cast("int").alias("runtime"),
+            _jc("runtime", "int").alias("runtime"),
             _j("type").alias("type"),
             _j("plot").alias("plot"),
-            F.to_timestamp(_j("released")).alias("released"),
+            _jt("released").alias("released"),
             _j("lastupdated").alias("lastupdated"),
-            _j("imdb.rating").cast("double").alias("imdb_rating"),
-            _j("imdb.votes").cast("long").alias("imdb_votes"),
-            _j("imdb.id").cast("long").alias("imdb_id"),
-            _j("tomatoes.viewer.rating").cast("double").alias("tomatoes_viewer_rating"),
-            _j("tomatoes.viewer.numReviews").cast("long").alias("tomatoes_viewer_reviews"),
-            _j("tomatoes.critic.rating").cast("double").alias("tomatoes_critic_rating"),
-            _j("awards.wins").cast("int").alias("awards_wins"),
-            _j("awards.nominations").cast("int").alias("awards_nominations"),
-            _j("num_mflix_comments").cast("int").alias("num_mflix_comments"),
+            _jc("imdb.rating", "double").alias("imdb_rating"),
+            _jc("imdb.votes", "long").alias("imdb_votes"),
+            _jc("imdb.id", "long").alias("imdb_id"),
+            _jc("tomatoes.viewer.rating", "double").alias("tomatoes_viewer_rating"),
+            _jc("tomatoes.viewer.numReviews", "long").alias("tomatoes_viewer_reviews"),
+            _jc("tomatoes.critic.rating", "double").alias("tomatoes_critic_rating"),
+            _jc("awards.wins", "int").alias("awards_wins"),
+            _jc("awards.nominations", "int").alias("awards_nominations"),
+            _jc("num_mflix_comments", "int").alias("num_mflix_comments"),
             F.col("_ingestion_id"),
             F.col("_ingestion_timestamp"),
         )
@@ -87,7 +109,7 @@ class SilverBuilder:
             _j("email").alias("email"),
             _j("movie_id").alias("movie_id"),
             _j("text").alias("text"),
-            F.to_timestamp(_j("date")).alias("date"),
+            _jt("date").alias("date"),
             F.col("_ingestion_id"),
             F.col("_ingestion_timestamp"),
         )
