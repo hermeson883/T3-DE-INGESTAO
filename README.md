@@ -196,3 +196,37 @@ rodando a pipeline em produção (Databricks Serverless, ANSI mode):
 (defende contra schema drift na tabela **alvo**) e
 [`§D11` — `try_cast`/limpeza na Silver](docs/DECISOES_TECNICAS.md#d11-ansi-mode-e-try_cast-com-limpeza-na-tipagem-da-silver-r7)
 (trata dado sujo real do `sample_mflix` sob ANSI mode sem descartar registro).
+
+---
+
+## 9. Uso de Inteligência Artificial
+
+Usei o **Claude (Anthropic), via Claude Code**, como par de desenvolvimento ao
+longo do trabalho — não para gerar a solução do zero, mas em duas frentes
+concretas:
+
+- **Estruturação do projeto**: organização da documentação (divisão entre
+  `README.md`, `docs/ARQUITETURA.md` e `docs/DECISOES_TECNICAS.md`,
+  cross-references entre eles), montagem do `CONTRIBUICOES.md`, e revisão de
+  onde cada requisito (R1–R8) e cada bônus estava efetivamente implementado.
+- **Fixação de erros de código**, encontrados rodando a pipeline de verdade
+  no Databricks:
+  - `[DELTA_MERGE_UNRESOLVED_EXPRESSION]` no `MERGE` da Bronze, causado por uma
+    coluna legada (`body_variant`) numa tabela que sobrou de uma versão
+    anterior do schema — corrigido trocando `whenMatchedUpdateAll()` por
+    lista explícita de colunas ([D10](docs/DECISOES_TECNICAS.md#d10-merge-com-lista-explícita-de-colunas-nunca-updateallinsertall)).
+  - `[CAST_INVALID_INPUT]` na Silver sob ANSI mode, com um valor real sujo em
+    `movies.year` (`'1981è'`) — corrigido com limpeza via `regexp_extract` +
+    `try_cast` em vez de deixar o registro virar `NULL`
+    ([D11](docs/DECISOES_TECNICAS.md#d11-ansi-mode-e-try_cast-com-limpeza-na-tipagem-da-silver-r7)).
+  - `[CANNOT_DETERMINE_TYPE]` ao exibir o resumo da execução, quando todas as
+    colunas opcionais (`watermark_inicial/final`, `mensagem_erro`) vinham
+    `None` na amostra — corrigido com schema explícito (`SUMMARY_SCHEMA`).
+  - Duplicação de `_source_id` na Bronze quando `force_full=True` era usado
+    em coleções incrementais — a gravação decidia `MERGE` vs `append` olhando
+    só o modo estático da coleção, ignorando `force_full` em runtime
+    ([D12](docs/DECISOES_TECNICAS.md#d12-force_full-precisa-forçar-merge-também-nas-coleções-incrementais)).
+
+Todas as decisões de arquitetura, a leitura dos requisitos do enunciado e a
+validação final de cada execução foram minhas — a IA ajudou a diagnosticar
+causa-raiz, propor e implementar o fix, e documentar o porquê.
