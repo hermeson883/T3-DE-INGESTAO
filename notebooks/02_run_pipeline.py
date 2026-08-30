@@ -36,7 +36,7 @@ ENGINE = dbutils.widgets.get("engine").strip()
 
 # COMMAND ----------
 
-from mflix_ingest.pipeline import run_pipeline
+from mflix_ingest.pipeline import run_pipeline, SUMMARY_SCHEMA
 
 summary = run_pipeline(
     spark,
@@ -56,7 +56,7 @@ print("run_id:", summary.run_id, "| ok:", summary.ok)
 
 # COMMAND ----------
 
-display(spark.createDataFrame(summary.to_rows()))
+display(spark.createDataFrame(summary.to_rows(), SUMMARY_SCHEMA))
 
 # COMMAND ----------
 

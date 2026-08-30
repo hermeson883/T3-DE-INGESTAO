@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from pyspark.sql import types as T
+
 from . import __version__
 from .config import PipelineConfig
 from .contract import ContractResult, load_contract, validate_contract
@@ -25,6 +27,27 @@ from .rules import STATUS_FAILED, STATUS_SUCCESS
 from .utils import get_logger, new_run_id, utc_now
 
 _log = get_logger("mflix_ingest.pipeline")
+
+# Schema explicito de RunSummary.to_rows() — obrigatorio ao passar para
+# spark.createDataFrame(). Varias colunas (watermark_inicial/final, mensagem_erro)
+# ficam None quando a execucao inteira e SUCCESS sem novidades; se a amostra usada
+# na inferencia automatica cair toda em None, o Spark nao consegue decidir o tipo
+# e estoura [CANNOT_DETERMINE_TYPE]. Ver padrao identico ja usado em
+# notebooks/04_dashboard.py e notebooks/06_explore_source.py.
+SUMMARY_SCHEMA = T.StructType([
+    T.StructField("run_id", T.StringType()),
+    T.StructField("collection", T.StringType()),
+    T.StructField("load_type", T.StringType()),
+    T.StructField("status", T.StringType()),
+    T.StructField("qtd_lida_origem", T.LongType()),
+    T.StructField("qtd_gravada_destino", T.LongType()),
+    T.StructField("watermark_inicial", T.StringType()),
+    T.StructField("watermark_final", T.StringType()),
+    T.StructField("divergencia_pct", T.DoubleType()),
+    T.StructField("qtd_quarentena", T.LongType()),
+    T.StructField("duracao_seg", T.DoubleType()),
+    T.StructField("mensagem_erro", T.StringType()),
+])
 
 
 @dataclass

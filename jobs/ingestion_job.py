@@ -29,7 +29,7 @@ ENGINE = dbutils.widgets.get("engine").strip()
 
 # COMMAND ----------
 
-from mflix_ingest.pipeline import run_pipeline
+from mflix_ingest.pipeline import run_pipeline, SUMMARY_SCHEMA
 
 summary = run_pipeline(
     spark,
@@ -49,7 +49,7 @@ for r in rows:
 
 # COMMAND ----------
 
-display(spark.createDataFrame(rows))
+display(spark.createDataFrame(rows, SUMMARY_SCHEMA))
 
 # COMMAND ----------
 
