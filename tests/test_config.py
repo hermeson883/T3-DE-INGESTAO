@@ -69,6 +69,15 @@ def test_catalog_override(cfg):
     assert over.target.bronze_table("users") == "dev_mflix.bronze.users"
 
 
+def test_engine_default_is_batch(cfg):
+    assert cfg.autoloader.engine == "batch"
+
+
+def test_engine_override(cfg):
+    over = PipelineConfig.load(PIPELINE_YAML, COLLECTIONS_JSON, overrides={"engine": "autoloader"})
+    assert over.autoloader.engine == "autoloader"
+
+
 def test_collectionspec_rejects_bad_mode():
     with pytest.raises(ValueError):
         CollectionSpec(collection="x", load_mode="delta")

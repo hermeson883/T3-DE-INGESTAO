@@ -98,6 +98,7 @@ class TargetConfig:
 
 @dataclass(frozen=True)
 class AutoloaderConfig:
+    engine: str = "batch"               # "batch" (padrao) | "autoloader"
     ingest_mode: str = "single_variant"
     cloud_files_format: str = "json"
     schema_evolution_mode: str = "rescue"
@@ -275,6 +276,7 @@ class PipelineConfig:
 
         al = cfg.get("autoloader", {})
         autoloader = AutoloaderConfig(
+            engine=overrides.get("engine") or al.get("engine", "batch"),
             ingest_mode=overrides.get("ingest_mode") or al.get("ingest_mode", "single_variant"),
             cloud_files_format=al.get("cloud_files_format", "json"),
             schema_evolution_mode=al.get("schema_evolution_mode", "rescue"),

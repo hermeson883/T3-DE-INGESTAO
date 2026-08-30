@@ -18,7 +18,9 @@ MongoDB sample_mflix
    │  count + find(filter incremental, projection/pushdown, batchSize)  ── retry/backoff, 1 conexão (pool)
    ▼
 landing.mflix_raw  (Volume)   <collection>/<collection>_<run_id>_<ts>.jsonl   ── cópia byte-a-byte da origem (R6)
-   ▼  Auto Loader (cloudFiles): checkpoint · schemaLocation persistido · VARIANT / rescued data
+   ▼  motor de carga (config autoloader.engine):
+   │    batch (padrão) ── spark.read dos arquivos DA execução · VARIANT · rápido, sem streaming
+   │    autoloader     ── readStream cloudFiles · checkpoint · schemaLocation persistido  (bônus +5, via bronze_job)
 bronze.<collection>  (Delta)   append (incremental) | MERGE _source_id (full) · partição _ingestion_date
    ├── bronze.<collection>_quarentena        registros inválidos (R7)
    ├── bronze.control_ingestion_log          1 linha por execução por coleção (R5)
@@ -46,7 +48,7 @@ src/mflix_ingest/
   utils.py  rules.py  config.py  contract.py     ← puros (cobertos por testes)
   mongo_source.py     extract (cursor paginado, pooling, retry)
   extractor.py        MongoDB → landing (JSON Lines)
-  loader.py           landing → Bronze (Auto Loader + MERGE/append)
+  loader.py           landing → Bronze (motor batch [padrão] ou autoloader; MERGE/append)
   control.py          watermark + control_ingestion_log + DDL
   quality.py          reconciliação origem × destino (R8)
   silver.py           camada Silver (bônus)
@@ -109,6 +111,7 @@ CONTRIBUICOES.md
 | `catalog` | `mflix` | catálogo alvo (override de `pipeline_config.yaml`) |
 | `collections` | `all` | `all` ou lista: `comments,users` |
 | `force_full` | `false` | ignora watermark, recarrega tudo como `full` |
+| `engine` | `batch` | `batch` (rápido, sem streaming) ou `autoloader` (readStream + checkpoint) |
 
 Toda a demais configuração está em `config/` — **nada hardcoded** (R1).
 
@@ -120,7 +123,7 @@ Toda a demais configuração está em `config/` — **nada hardcoded** (R1).
 |---|---|---|
 | **R1** | Pipeline genérica e parametrizada, OOP, config externalizada | `config/*` + `src/mflix_ingest/config.py`; extract/load/control separados em módulos; `pipeline.run_pipeline` roda as 6 coleções com o mesmo código |
 | **R2** | ≥4 boas práticas de recurso, justificadas | cursor em lotes, projection/pushdown, sem `collect/toPandas/list`, partição no destino, pooling, retry+backoff — tabela em [ARQUITETURA §5](docs/ARQUITETURA.md#5-boas-práticas-de-recurso-r2--onde-estão-no-código) |
-| **R3** | Full + incremental com watermark persistida + idempotência | `full` (users/theaters/sessions/embedded_movies) via MERGE; `incremental` (comments/movies) via append + `bronze.ingestion_watermark`; ver [DECISOES D3/D4](docs/DECISOES_TECNICAS.md) |
+| **R3** | Full + incremental com watermark persistida + idempotência | `full` (users/theaters/sessions/embedded_movies) via MERGE por `_source_id`; `incremental` (comments/movies) via append + `bronze.ingestion_watermark`. O motor `batch` lê só o arquivo `.jsonl` **daquela execução** (`<run_id>` no nome) → re-run não reprocessa; ver [DECISOES D3/D4](docs/DECISOES_TECNICAS.md) |
 | **R4** | Colunas de rastreabilidade em toda Bronze | `_ingestion_id`, `_ingestion_timestamp`, `_source_path`, `_load_type`, `_ingestion_date` (+ `_source_id`, `body_variant`, `body_json`, `_rescued_data`, `_source_hash`, `_source_file`) — DDL em `control.bronze_ddl` |
 | **R5** | `control_ingestion_log` | `bronze.control_ingestion_log`, escrita a cada execução por `control.ControlManager.log_run`; schema com todos os campos pedidos + extras |
 | **R6** | Bronze Delta, append-only, fiel à origem, particionada, nomenclatura | Delta particionada por `_ingestion_date`; documento preservado em `body_variant`/`body_json`; arquivo JSONL imutável na landing; padrão `catalog.schema.tabela` |
@@ -133,7 +136,7 @@ Toda a demais configuração está em `config/` — **nada hardcoded** (R1).
 
 | Bônus | Status | Onde |
 |---|---|---|
-| **+5** Ingestão orientada a arquivos (Auto Loader + checkpoint + schema persistido) | ✅ desenho principal | `loader.py`, `jobs/bronze_job.py` |
+| **+5** Ingestão orientada a arquivos (landing zone + Auto Loader `cloudFiles` + checkpoint + schemaLocation persistido) | ✅ `loader.py` motor `autoloader`, usado pelo `jobs/bronze_job` (consumidor independente da landing). A pipeline principal usa motor `batch` por robustez/velocidade. | `loader.py`, `jobs/bronze_job.py` |
 | **+4** Camada Silver (`movies` normalizada, explode, dedup latest) | ✅ | `silver.py`, `jobs/silver_job.py` |
 | **+4** Orquestração (Job com dependências, retry, notificação de falha, agendamento) | ✅ | `notebooks/05_create_workflow.py`, `config/workflow_job.json` |
 | **+3** Observabilidade (dashboard sobre `control_ingestion_log`) | ✅ | `notebooks/04_dashboard.py`, `config/dashboard_queries.sql` |

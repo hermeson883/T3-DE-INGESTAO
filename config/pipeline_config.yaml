@@ -45,10 +45,16 @@ landing:
   files_per_run: 1
 
 autoloader:
-  # single_variant  -> ingere cada documento numa unica coluna VARIANT (DBR 15.3+/Serverless).
-  #                    Schema drift e estruturalmente impossivel. RECOMENDADO.
-  # inferred        -> Auto Loader infere e PERSISTE o schema em schemaLocation,
-  #                    schemaEvolutionMode=rescue joga campos novos/divergentes em _rescued_data.
+  # engine: como a landing e consumida.
+  #   batch      -> spark.read dos arquivos DA execucao (rapido, sem streaming/
+  #                 checkpoint/cold start). PADRAO — use para a pipeline principal.
+  #   autoloader -> readStream cloudFiles + checkpoint + schemaLocation persistido
+  #                 + trigger(availableNow). Bonus +5 (ingestao orientada a arquivos).
+  #                 Use no jobs/bronze_job para reprocessamento / demonstracao.
+  engine: batch
+  # single_variant  -> cada documento numa unica coluna VARIANT (DBR 15.3+/Serverless).
+  #                    Schema drift estruturalmente impossivel. body_json byte-a-byte.
+  # inferred        -> schema inferido de cada arquivo; campos divergentes -> _rescued_data.
   ingest_mode: single_variant
   cloud_files_format: json
   schema_evolution_mode: rescue     # usado somente no modo inferred

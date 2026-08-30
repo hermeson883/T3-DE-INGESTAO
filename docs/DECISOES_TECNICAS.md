@@ -5,24 +5,39 @@ Foca no *porquê* de cada escolha e nos trade-offs.
 
 ---
 
-## D1. Landing zone + Auto Loader (em vez de Mongo → Bronze direto)
+## D1. Landing zone (Volume) + dois motores de carga
 
-**Escolha:** MongoDB → arquivo JSONL num Volume → Auto Loader → Bronze.
+**Escolha:** MongoDB → arquivo JSONL num Volume → Bronze. A leitura landing→Bronze
+tem **dois motores** (`config: autoloader.engine`):
 
-**Por quê:**
-- Desacopla extração de carga. A Bronze pode ser reconstruída/reprocessada
-  (`jobs/bronze_job`) sem tocar de novo na origem.
-- O arquivo imutável no Volume **é** a prova de fidelidade à origem (R6): posso
-  abrir o `.jsonl` e comparar byte a byte.
-- `cloudFiles` traz de graça: checkpoint (exactly-once por arquivo),
-  `schemaLocation` (schema inferido persistido — bônus), `rescuedDataColumn`
-  (schema drift sem quebrar — R7).
-- Atende o bônus **+5 (ingestão orientada a arquivos)** como parte do desenho
-  principal, não como um apêndice.
+| Motor | Como | Quando |
+|---|---|---|
+| `batch` (**padrão**) | `spark.read.text()` dos arquivos **daquela execução** (identificados pelo `<run_id>` no nome) → `VARIANT` → append/MERGE | pipeline principal (`ingestion_job`) |
+| `autoloader` | `readStream` `cloudFiles` + `checkpointLocation` + `schemaLocation` persistido + `trigger(availableNow)` | `bronze_job` (reprocessamento / bônus +5) |
 
-**Trade-off:** mais peças móveis (checkpoints, schema locations, um Volume) e uma
-cópia extra dos dados na landing. Aceitável: o Volume é barato e a cópia é a
-própria evidência de auditoria.
+**Por que a landing zone (comum aos dois):**
+- Desacopla extração de carga. A Bronze pode ser reconstruída sem tocar na origem.
+- O `.jsonl` imutável no Volume **é** a prova de fidelidade à origem (R6).
+
+**Por que `batch` como padrão:**
+- Volume real do trabalho é pequeno (~80k linhas no total das 6 coleções). O
+  streaming do Auto Loader cobra *cold start* por query (schemaLocation,
+  checkpoint, provisão) — e a pipeline sobe **uma query por coleção, em série**.
+  Em Serverless isso levou ~20 min / travou.
+- `batch` lê exatamente os arquivos da execução (`ext.files`), sem checkpoint:
+  a idempotência vem da watermark (incremental não re-extrai) e do `MERGE` por
+  `_source_id` (full). Roda as 6 coleções em ~1–2 min.
+- `spark.read.text` preserva `body_json` **byte-a-byte** (1 linha = 1 doc), melhor
+  fidelidade que o `singleVariantColumn` do Auto Loader.
+
+**Por que manter o `autoloader`:**
+- Atende literalmente o bônus **+5** ("consumir com Auto Loader / `readStream` com
+  checkpoint e schema inference persistida"). Fica no `bronze_job`, fora do
+  caminho crítico, então a lentidão/fragilidade não bloqueia a entrega.
+
+**Trade-off:** o `batch` não tem "checkpoint" formal — se a mesma execução for
+disparada 2× com o mesmo `run_id` (não acontece na prática, cada `run_pipeline`
+gera um UUID novo), poderia reprocessar. Mitigado por `MERGE`/watermark.
 
 ---
 

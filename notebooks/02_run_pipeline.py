@@ -23,10 +23,12 @@
 dbutils.widgets.text("collections", "all", "Colecoes")
 dbutils.widgets.text("catalog", "mflix", "Catalogo")
 dbutils.widgets.dropdown("force_full", "false", ["false", "true"], "force_full")
+dbutils.widgets.dropdown("engine", "batch", ["batch", "autoloader"], "Motor de carga")
 
 COLLECTIONS = dbutils.widgets.get("collections").strip()
 CATALOG = dbutils.widgets.get("catalog").strip()
 FORCE_FULL = dbutils.widgets.get("force_full") == "true"
+ENGINE = dbutils.widgets.get("engine").strip()
 
 # COMMAND ----------
 
@@ -43,7 +45,7 @@ summary = run_pipeline(
     collections_path=COLLECTIONS_PATH,
     collections=COLLECTIONS,
     force_full=FORCE_FULL,
-    overrides={"catalog": CATALOG},
+    overrides={"catalog": CATALOG, "engine": ENGINE},
 )
 
 print("run_id:", summary.run_id, "| ok:", summary.ok)

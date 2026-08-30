@@ -128,8 +128,9 @@ def run_pipeline(
                     )
                     _log.info("[%s] %s -> SUCCESS sem gravacao", spec.collection, ext.skipped_reason)
                 else:
-                    # ---- load landing -> bronze ----
-                    ld = loader.load(spec, run_id, ingestion_ts, cfg.source.source_path_tag)
+                    # ---- load landing -> bronze (le exatamente os arquivos desta execucao) ----
+                    ld = loader.load(spec, run_id, ingestion_ts, cfg.source.source_path_tag,
+                                     files=ext.files)
 
                     # ---- reconcile (R8) ----
                     rep = reconciler.evaluate(

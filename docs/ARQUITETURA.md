@@ -1,7 +1,7 @@
 # Arquitetura — Ingestão `sample_mflix` → Bronze
 
 Solução real implementada neste repositório. Origem MongoDB → Landing (Volume) →
-Auto Loader → Bronze (Delta) → controle/observabilidade.
+carga (motor `batch` padrão, ou `autoloader`) → Bronze (Delta) → controle/observabilidade.
 
 ---
 
@@ -21,8 +21,8 @@ flowchart LR
     subgraph UC["Databricks — Unity Catalog (catálogo mflix)"]
         direction TB
         L["landing.mflix_raw (Volume)\n&lt;collection&gt;/&lt;collection&gt;_&lt;runid&gt;_&lt;ts&gt;.jsonl\n(cópia byte-a-byte da origem)"]
-        A["Auto Loader (cloudFiles)\nschemaLocation (persistido)\nsingleVariantColumn / rescue\ncheckpoint · trigger(availableNow)"]
-        B[("bronze.&lt;collection&gt; (Delta)\nappend | MERGE por _source_id\npartição _ingestion_date")]
+        A["motor de carga\nbatch: spark.read dos arquivos da execução (padrão)\nautoloader: cloudFiles + checkpoint + schemaLocation (bônus +5)\n-> body_json + body_variant (VARIANT) + _rescued_data"]
+        B[("bronze.&lt;collection&gt; (Delta)\nappend (incremental) | MERGE _source_id (full)\npartição _ingestion_date")]
         QN[("bronze.&lt;collection&gt;_quarentena")]
         C[("bronze.control_ingestion_log")]
         W[("bronze.ingestion_watermark")]
@@ -57,9 +57,8 @@ via widget `catalog` / override).
 | Camada | Objeto | Descrição |
 |---|---|---|
 | Landing | `mflix.landing.mflix_raw` (Volume) | `.../<collection>/<collection>_<run_id>_<ts>.jsonl` — 1 arquivo por coleção por execução. Dado **como veio da origem**. |
-| Landing (operacional) | `.../_checkpoints/<collection>` | checkpoint do Auto Loader (exactly-once por arquivo) |
-| Landing (operacional) | `.../_schemas/<collection>` | schema inferido **persistido** entre execuções |
-| Landing (operacional) | `.../_badrecords/<collection>` | linhas ilegíveis capturadas pelo reader |
+| Landing (operacional) | `.../_checkpoints/<collection>` | checkpoint (só motor `autoloader`) — exactly-once por arquivo |
+| Landing (operacional) | `.../_schemas/<collection>` | schemaLocation persistido (só motor `autoloader`) |
 | Bronze | `mflix.bronze.<collection>` | Delta, append-only (incremental) / MERGE (full), particionada por `_ingestion_date` |
 | Bronze | `mflix.bronze.<collection>_quarentena` | registros sem `_source_id` ou JSON inválido (R7) |
 | Bronze | `mflix.bronze.control_ingestion_log` | R5 — 1 linha por execução por coleção |
@@ -91,28 +90,36 @@ via widget `catalog` / override).
 ```
 Decisão: JSON Lines (um documento JSON por linha), sem compressão, 1 arquivo por
          coleção por execução.
-Justificativa: JSONL é splittable e lido 1 linha = 1 documento pelo Auto Loader
-         (sem multiLine). Preserva o documento exatamente como veio da origem
-         (serialização json.dumps + encoder BSON). O arquivo imutável no Volume
-         é a evidência de fidelidade à origem (R6).
+Justificativa: JSONL é splittable e lido 1 linha = 1 documento (sem multiLine).
+         Preserva o documento exatamente como veio da origem (serialização
+         json.dumps + encoder BSON). O arquivo imutável no Volume é a evidência
+         de fidelidade à origem (R6).
 ```
 
-**Trigger do job Bronze**
+**Motor de carga landing → Bronze**
 ```
-Decisão: Auto Loader com Trigger.AvailableNow (lote), não streaming contínuo.
-Justificativa: a origem é batelada (extração dispara o arquivo). AvailableNow
-         processa tudo que chegou e encerra — custo previsível, sem cluster
-         sempre ligado. O checkpoint dá exactly-once por arquivo mesmo entre
-         execuções distintas.
+Decisão: motor `batch` (spark.read dos arquivos DA execução) como padrão;
+         motor `autoloader` (readStream cloudFiles + checkpoint + schemaLocation
+         + Trigger.AvailableNow) disponível via config, usado no bronze_job.
+Justificativa: o volume total (~80k linhas) não justifica o custo de cold start
+         de 6 streams em série (observado ~20 min / travamento em Serverless).
+         O `batch` lê só o `.jsonl` da execução (run_id no nome), roda em ~1-2 min,
+         e preserva body_json byte-a-byte. Idempotência: watermark (incremental)
+         + MERGE por _source_id (full), sem depender de checkpoint.
+         O `autoloader` fica para reprocessamento da landing e para atender
+         literalmente o bônus +5 — fora do caminho crítico.
 ```
 
 **Estratégia de idempotência na Bronze (R3)**
 ```
 Decisão:
   - coleções incrementais (comments, movies): APPEND. Não-duplicação vem de
-    (a) watermark persistida + filtro $gt no extract e (b) checkpoint do Auto Loader.
+    (a) watermark persistida + filtro $gt no extract e (b) o motor `batch` ler
+    somente o arquivo `.jsonl` daquela execução (`<run_id>` no nome) — ou o
+    checkpoint, no motor `autoloader`.
   - coleções full (users, theaters, sessions, embedded_movies): MERGE por _source_id
     (upsert) — rodar de novo não cria linha nova.
+  - modo reprocesso (bronze_job lê a landing inteira): sempre MERGE.
 Justificativa: append preserva histórico de chegada nas incrementais (Bronze =
          verdade append-only); MERGE resolve o caso "recarrega tudo" das full sem
          inflar a tabela. Ambos os caminhos são idempotentes a re-execução.
@@ -125,11 +132,11 @@ Risco residual documentado: se o extract grava o arquivo e falha ANTES de
 
 **Tratamento de schema drift (R7)**
 ```
-Decisão: modo padrão single_variant — cada documento vira uma coluna VARIANT.
-         Schema drift é estruturalmente impossível (VARIANT acomoda qualquer
-         forma). Modo alternativo inferred: schemaEvolutionMode=rescue +
-         rescuedDataColumn=_rescued_data (campo novo/divergente vai para
-         _rescued_data, o stream nunca quebra).
+Decisão: modo padrão single_variant — body_json (linha crua) + body_variant
+         (VARIANT). Schema drift é estruturalmente impossível (VARIANT acomoda
+         qualquer forma). Modo alternativo inferred: leitura com schema inferido +
+         coluna de rescue (`columnNameOfCorruptRecord`/`rescuedDataColumn`) —
+         campo divergente/registro malformado vai para _rescued_data, nunca quebra.
 Justificativa: NoSQL schemaless — travar um StructType na Bronze geraria
          reprocessamento a cada campo novo. VARIANT + _rescued_data preserva
          100% do documento e empurra a tipagem para a Silver.
@@ -178,6 +185,6 @@ Reconciliação **acumulada**: `Σ control_ingestion_log.qtd_gravada_destino` vs
 | Leitura paginada / cursor em lotes | `MongoSource.iter_documents` — `find(..., batch_size=N)` iterado como **generator**, retomada por `_id` em reconexão |
 | Projection / pushdown | `rules.mongo_projection` + `CollectionSpec.projection_exclude` → `find(projection={campo:0})` no servidor |
 | Sem `collect()` / `toPandas()` / `list(cursor)` | extract grava direto em arquivo linha a linha; `sample()` limitado a ≤500 docs só para contrato |
-| Controle de partição no destino | Bronze particionada por `_ingestion_date`; `optimizeWrite`/`autoCompact`; `maxFilesPerTrigger` no Auto Loader |
+| Controle de partição no destino | Bronze particionada por `_ingestion_date`; `optimizeWrite`/`autoCompact`; `maxFilesPerTrigger` (motor autoloader) |
 | Reuso de conexão / pooling | 1 `MongoClient` (pool `maxPoolSize`) para todas as coleções da execução (`with MongoSource(...)`) |
 | Retry com backoff | `utils.retry` (exponencial + jitter) em `count`, `aggregate`, `find`, `sample` sobre exceções transitórias do PyMongo |

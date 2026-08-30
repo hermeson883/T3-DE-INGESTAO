@@ -25,8 +25,11 @@
 
 dbutils.widgets.text("catalog", "mflix", "Catalogo")
 dbutils.widgets.text("collections", "all", "Colecoes")
+dbutils.widgets.dropdown("engine", "autoloader", ["autoloader", "batch"], "Motor de carga")
+
 CATALOG = dbutils.widgets.get("catalog").strip()
 COLLECTIONS = dbutils.widgets.get("collections").strip()
+ENGINE = dbutils.widgets.get("engine").strip()
 
 # COMMAND ----------
 
@@ -41,7 +44,9 @@ from mflix_ingest.loader import BronzeLoader
 from mflix_ingest.quality import Reconciler
 from mflix_ingest.utils import new_run_id, utc_now
 
-cfg = PipelineConfig.load(CONFIG_PATH, COLLECTIONS_PATH, overrides={"catalog": CATALOG})
+# bronze_job = consumidor independente da landing -> autoloader por padrao (bonus +5)
+cfg = PipelineConfig.load(CONFIG_PATH, COLLECTIONS_PATH,
+                          overrides={"catalog": CATALOG, "engine": ENGINE})
 run_id = new_run_id()
 ts = utc_now()
 
