@@ -153,11 +153,12 @@ def run_pipeline(
                 else:
                     # ---- load landing -> bronze (le exatamente os arquivos desta execucao) ----
                     ld = loader.load(spec, run_id, ingestion_ts, cfg.source.source_path_tag,
-                                     files=ext.files)
+                                     files=ext.files, force_full=force_full)
 
                     # ---- reconcile (R8) ----
                     rep = reconciler.evaluate(
                         spec, run_id, ext.source_count, ld.rows_written, contract_ok=cres.ok,
+                        force_full=force_full,
                     )
                     rec.finish(
                         rep.status,

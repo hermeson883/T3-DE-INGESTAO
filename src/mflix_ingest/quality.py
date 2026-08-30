@@ -60,6 +60,7 @@ class Reconciler:
         source_count: int,
         written_count: int,
         contract_ok: bool = True,
+        force_full: bool = False,
     ) -> QualityReport:
         table = self.cfg.target.bronze_table(spec.collection)
         batch = self.spark.table(table).where(F.col("_ingestion_id") == run_id)
@@ -93,8 +94,10 @@ class Reconciler:
 
         acc_written = self.control.accumulated_written(spec.collection) + written_count
         acc_bronze = self.spark.table(table).count()
-        # append: devem bater; merge (full): bronze <= soma dos lotes (upsert)
-        write_mode_full = self.cfg.bronze.write_mode_full == "merge" and spec.load_mode == "full"
+        # append: devem bater; merge (full, ou incremental sob force_full): bronze <= soma dos lotes (upsert)
+        write_mode_full = self.cfg.bronze.write_mode_full == "merge" and (
+            force_full or spec.load_mode == "full"
+        )
         accumulated_ok = acc_bronze >= acc_written if write_mode_full else acc_bronze == acc_written
 
         report = QualityReport(

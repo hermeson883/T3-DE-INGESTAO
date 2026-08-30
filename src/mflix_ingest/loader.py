@@ -77,6 +77,7 @@ class BronzeLoader:
         ingestion_ts: _dt.datetime,
         source_path_tag: str,
         files: list[str] | None = None,
+        force_full: bool = False,
     ) -> LoadResult:
         collection = spec.collection
         target_table = self.target.bronze_table(collection)
@@ -91,11 +92,11 @@ class BronzeLoader:
         if self.al.engine == "autoloader":
             return self._load_autoloader(
                 spec, target_table, quarantine_table, landing,
-                run_id, ingestion_ts, source_path_tag,
+                run_id, ingestion_ts, source_path_tag, force_full,
             )
         return self._load_batch(
             spec, target_table, quarantine_table, landing, files,
-            run_id, ingestion_ts, source_path_tag,
+            run_id, ingestion_ts, source_path_tag, force_full,
         )
 
     # ------------------------------------------------------------------ #
@@ -111,6 +112,7 @@ class BronzeLoader:
         run_id: str,
         ingestion_ts: _dt.datetime,
         source_path_tag: str,
+        force_full: bool = False,
     ) -> LoadResult:
         collection = spec.collection
         reprocess = files is None
@@ -127,7 +129,7 @@ class BronzeLoader:
             _log.info("[%s] landing sem arquivos — nada a carregar", collection)
             return LoadResult(collection, 0, 0, 0)
 
-        use_merge = reprocess or self._write_mode(spec) == "merge"
+        use_merge = reprocess or self._write_mode(spec, force_full) == "merge"
         _log.info("[%s] batch: %d arquivo(s) | %s",
                   collection, len(files), "MERGE" if use_merge else "append")
 
@@ -142,7 +144,8 @@ class BronzeLoader:
         # Serverless nao suporta persist/cache de DataFrame
         # ([NOT_SUPPORTED_WITH_SERVERLESS] PERSIST TABLE) — o plano e recomputado
         # a cada acao. Custo baixo: a origem e o(s) .jsonl da propria execucao.
-        enriched = self._shape(raw, run_id, ingestion_ts, source_path_tag, spec.load_mode)
+        enriched = self._shape(raw, run_id, ingestion_ts, source_path_tag,
+                               spec.effective_load_type(force_full))
         good = enriched.where(F.col("_source_id").isNotNull())
         bad = enriched.where(F.col("_source_id").isNull())
 
@@ -172,11 +175,12 @@ class BronzeLoader:
         run_id: str,
         ingestion_ts: _dt.datetime,
         source_path_tag: str,
+        force_full: bool = False,
     ) -> LoadResult:
         collection = spec.collection
         checkpoint = self.target.checkpoint_path(collection)
         schema_loc = self.target.schema_path(collection)
-        write_mode = self._write_mode(spec)
+        write_mode = self._write_mode(spec, force_full)
 
         raw = (
             self.spark.readStream.format("cloudFiles")
@@ -193,7 +197,8 @@ class BronzeLoader:
 
         def process_batch(bdf: DataFrame, batch_id: int) -> None:
             # sem persist(): nao suportado em Serverless
-            enriched = self._shape(bdf, run_id, ingestion_ts, source_path_tag, spec.load_mode)
+            enriched = self._shape(bdf, run_id, ingestion_ts, source_path_tag,
+                                   spec.effective_load_type(force_full))
             good = enriched.where(F.col("_source_id").isNotNull())
             bad = enriched.where(F.col("_source_id").isNull())
             if write_mode == "merge":
@@ -259,7 +264,17 @@ class BronzeLoader:
         )
         return out.select(*BRONZE_COLUMNS)
 
-    def _write_mode(self, spec: CollectionSpec) -> str:
+    def _write_mode(self, spec: CollectionSpec, force_full: bool = False) -> str:
+        """MERGE quando a coleção é `full` OU a execução força full (`force_full`).
+
+        `spec.load_mode` é o modo ESTÁTICO da config (`collections.json`) — nunca
+        muda sozinho. Sem considerar `force_full` aqui, uma coleção incremental
+        (`movies`/`comments`) rodada com `force_full=True` reextrai a coleção
+        inteira mas continua caindo em `append` (write_mode_incremental),
+        duplicando `_source_id` a cada execução — bug real encontrado em produção.
+        """
+        if force_full:
+            return self.bronze.write_mode_full
         return (
             self.bronze.write_mode_full if spec.load_mode == "full"
             else self.bronze.write_mode_incremental

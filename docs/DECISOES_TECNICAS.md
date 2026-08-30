@@ -250,3 +250,55 @@ segurança, não limpeza ativa.
 **Coerência com R7:** o documento bruto nunca é alterado — `body_json`
 continua com `'1981è'` intacto; só a coluna **tipada** da Silver é que reflete
 o valor limpo (ou `NULL` quando irrecuperável). Nenhum registro é descartado.
+
+---
+
+## D12. `force_full` precisa forçar MERGE também nas coleções incrementais
+
+**Bug encontrado (2026-08-30, reset completo do ambiente):** rodar a pipeline
+com `force_full=True` fazia `movies`/`comments` (coleções `incremental`)
+reextraírem a coleção **inteira** da origem, mas `loader._write_mode` decidia
+`append` vs `MERGE` olhando só `spec.load_mode` — o modo **estático** da
+config (`collections.json`), que nunca muda em runtime. Resultado: toda
+execução com `force_full=True` sobre `movies`/`comments` fazia **append da
+coleção inteira de novo**, duplicando `_source_id` a cada rodada. Ficou visível
+depois de um `DROP CATALOG` + múltiplas tentativas de `force_full=True` (viu-se
+o dropdown do widget não "pegar" na primeira tentativa, ver conversa anterior)
+— cada tentativa bem-sucedida duplicou de novo as ~23k/~50k linhas.
+
+**Escolha:** `BronzeLoader.load()`/`_load_batch`/`_load_autoloader` passam a
+receber `force_full` explicitamente, e `_write_mode(spec, force_full)` retorna
+`merge` sempre que `force_full=True`, independente de `spec.load_mode`.
+`pipeline.run_pipeline` propaga o `force_full` do parâmetro da execução direto
+pro `loader.load(...)`.
+
+**Por quê MERGE e não append-com-dedup-depois:** `force_full` existe
+justamente como ferramenta de backfill/reset (ver D3) — sempre que ele reextrai
+a coleção inteira, o destino tem que fazer *upsert* por `_source_id`, senão o
+próprio propósito da ferramenta (reprocessar sem duplicar) fica quebrado. Isso
+alinha `force_full` com o comportamento das coleções `full` "de verdade"
+(`users`/`theaters`/etc., que já sempre MERGE — D4), que é exatamente o que
+`force_full` simula para as incrementais.
+
+**Limpeza necessária:** esse fix impede duplicação em execuções **futuras**,
+mas não desfaz duplicatas que já foram gravadas por execuções `force_full`
+anteriores a este commit. Se `bronze.movies`/`bronze.comments` já têm
+`_source_id` duplicado, a única correção é recriar a tabela do zero
+(`DROP CATALOG ... CASCADE` + `01_setup_catalog` + nova carga) — não há como
+"consertar" uma tabela append-only com duplicatas sem reprocessar.
+
+**Continuação do fix (mesma varredura, dois pontos que ficaram para trás na
+primeira correção):**
+
+- `loader._shape(..., load_type)` — chamado em `_load_batch` e
+  `_load_autoloader` — recebia `spec.load_mode` (estático) em vez de
+  `spec.effective_load_type(force_full)`. Consequência: a coluna `_load_type`
+  gravada em CADA LINHA da Bronze (coluna de rastreabilidade obrigatória, R4)
+  ficava `incremental` mesmo numa execução `force_full=True`, contradizendo o
+  `control_ingestion_log` (que já mostrava `full` corretamente via
+  `ControlRecord.load_type`). Corrigido para usar `effective_load_type`.
+- `quality.Reconciler.evaluate` não recebia `force_full` — o campo
+  `accumulated_ok` (diagnóstico informativo, não afeta `status`) assumia
+  `append` para `movies`/`comments` mesmo depois de um `force_full` ter feito
+  `MERGE`, podendo acusar divergência acumulada falsa. `evaluate()` agora
+  aceita `force_full` e `pipeline.run_pipeline` propaga o parâmetro.
