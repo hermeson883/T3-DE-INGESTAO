@@ -86,7 +86,7 @@ display(spark.table(f"{CATALOG}.bronze.ingestion_watermark").orderBy("collection
 tbl = (COLLECTIONS.split(",")[0].strip() if COLLECTIONS not in ("all", "") else "comments")
 display(
     spark.table(f"{CATALOG}.bronze.{tbl}")
-    .select("_source_id", "body_variant", "_rescued_data", "_ingestion_id",
+    .select("_source_id", "body_json", "_rescued_data", "_ingestion_id",
             "_ingestion_timestamp", "_source_path", "_load_type", "_ingestion_date")
     .limit(20)
 )

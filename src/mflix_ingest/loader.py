@@ -1,21 +1,17 @@
 """Load: landing (JSON Lines) -> Bronze (Delta).
 
-Dois motores (config `autoloader.engine`):
+Motores (config `autoloader.engine`):
+  batch  (PADRAO) -> spark.read.json dos arquivos DA execucao. Sem streaming.
+  autoloader      -> readStream cloudFiles + checkpoint + schemaLocation (bonus +5).
 
-  batch  (PADRAO) -> spark.read dos arquivos da landing. Sem streaming, sem
-                     checkpoint, sem cold start. Rapido e previsivel para os
-                     volumes do sample_mflix (~80k linhas no total).
-  autoloader      -> readStream `cloudFiles` + checkpoint + schemaLocation
-                     persistido + trigger(availableNow). Bonus +5 (ingestao
-                     orientada a arquivos). Use no `jobs/bronze_job` para
-                     reprocessamento / demonstracao.
+Bronze guarda o documento como STRING JSON (`body_json`) — fidelidade total, zero
+risco de parsing. A tipagem acontece na Silver (`from_json`). `_source_id` vem da
+coluna `_id` (o extractor ja serializa como string), sem extrair de tipo complexo.
 
-Idempotencia (R3), igual nos dois motores:
-  - colecoes full         -> MERGE por _source_id (upsert)
-  - colecoes incrementais -> append (nao-duplicacao vem da watermark no extract;
-                             o batch le so o arquivo DA execucao, o autoloader
-                             usa o checkpoint)
-  - modo reprocesso (bronze_job, le a landing inteira) -> sempre MERGE
+Idempotencia (R3):
+  - full         -> MERGE por _source_id (fallback: overwrite snapshot)
+  - incremental  -> append (nao-duplicacao: watermark no extract + arquivo por run)
+  - reprocesso   -> MERGE (bronze_job le a landing inteira)
 """
 
 from __future__ import annotations
@@ -33,10 +29,9 @@ from .utils import get_logger
 
 _log = get_logger("mflix_ingest.load")
 
-# Ordem canonica das colunas da Bronze (a mesma do DDL em control.bronze_ddl).
+# Ordem canonica das colunas da Bronze (igual ao DDL em control.bronze_ddl).
 BRONZE_COLUMNS = [
     "_source_id",
-    "body_variant",
     "body_json",
     "_rescued_data",
     "_source_hash",
@@ -47,6 +42,8 @@ BRONZE_COLUMNS = [
     "_load_type",
     "_ingestion_date",
 ]
+
+_NON_PAYLOAD = {"_rescued_data", "_source_file", "_metadata", "_corrupt_record"}
 
 
 @dataclass
@@ -81,8 +78,6 @@ class BronzeLoader:
         source_path_tag: str,
         files: list[str] | None = None,
     ) -> LoadResult:
-        """`files` = arquivos exatos desta execucao (extractor). None -> le a
-        landing inteira (reprocesso)."""
         collection = spec.collection
         target_table = self.target.bronze_table(collection)
         quarantine_table = self.target.bronze_quarantine_table(collection)
@@ -118,7 +113,6 @@ class BronzeLoader:
         source_path_tag: str,
     ) -> LoadResult:
         collection = spec.collection
-        ingest_mode = spec.ingest_mode or self.al.ingest_mode
         reprocess = files is None
 
         if reprocess:
@@ -134,16 +128,21 @@ class BronzeLoader:
             return LoadResult(collection, 0, 0, 0)
 
         use_merge = reprocess or self._write_mode(spec) == "merge"
-        _log.info("[%s] batch: %d arquivo(s) | ingest_mode=%s | %s",
-                  collection, len(files), ingest_mode, "MERGE" if use_merge else "append")
+        _log.info("[%s] batch: %d arquivo(s) | %s",
+                  collection, len(files), "MERGE" if use_merge else "append")
 
-        raw = self._read_files(files, ingest_mode)
-        enriched = self._add_lineage(
-            raw, run_id, ingestion_ts, source_path_tag, spec.load_mode,
-        ).persist()
+        raw = (
+            self.spark.read
+            .option("mode", "PERMISSIVE")
+            .option("columnNameOfCorruptRecord", "_corrupt_record")
+            .option("multiLine", "false")
+            .json(files)
+            .withColumn("_source_file", F.col("_metadata.file_path"))
+        )
+        enriched = self._shape(raw, run_id, ingestion_ts, source_path_tag, spec.load_mode).persist()
         try:
-            good = enriched.where(F.col("_source_id").isNotNull() & F.col("body_variant").isNotNull())
-            bad = enriched.where(F.col("_source_id").isNull() | F.col("body_variant").isNull())
+            good = enriched.where(F.col("_source_id").isNotNull())
+            bad = enriched.where(F.col("_source_id").isNull())
             n_bad = bad.count()
 
             if use_merge:
@@ -152,42 +151,13 @@ class BronzeLoader:
                 self._append(good, target_table)
             if n_bad:
                 self._append(bad, quarantine_table)
-                _log.warning("[%s] %d registro(s) -> quarentena", collection, n_bad)
+                _log.warning("[%s] %d registro(s) sem _id -> quarentena", collection, n_bad)
         finally:
             enriched.unpersist()
 
-        written = (
-            self.spark.table(target_table)
-            .where(F.col("_ingestion_id") == run_id).count()
-        )
+        written = self.spark.table(target_table).where(F.col("_ingestion_id") == run_id).count()
         _log.info("[%s] bronze (batch): %d gravados / %d quarentena", collection, written, n_bad)
         return LoadResult(collection, written, n_bad, 1)
-
-    def _read_files(self, files: list[str], ingest_mode: str) -> DataFrame:
-        """Le os .jsonl e devolve DF com body_json + body_variant + _rescued_data + _source_file."""
-        if ingest_mode == "single_variant":
-            # 1 linha = 1 documento; body_json byte-a-byte como veio da origem
-            df = (
-                self.spark.read.text(files)
-                .withColumnRenamed("value", "body_json")
-                .withColumn("body_variant", F.expr("try_parse_json(body_json)"))
-                .withColumn("_rescued_data", F.lit(None).cast("string"))
-            )
-        else:
-            j = (
-                self.spark.read
-                .option("mode", "PERMISSIVE")
-                .option("columnNameOfCorruptRecord", "_rescued_data")
-                .json(files)
-            )
-            if "_rescued_data" not in j.columns:
-                j = j.withColumn("_rescued_data", F.lit(None).cast("string"))
-            payload = [c for c in j.columns if c != "_rescued_data"]
-            df = (
-                j.withColumn("body_json", F.to_json(F.struct(*[F.col(c) for c in payload])))
-                .withColumn("body_variant", F.expr("try_parse_json(body_json)"))
-            )
-        return df.withColumn("_source_file", F.col("_metadata.file_path"))
 
     # ------------------------------------------------------------------ #
     # Motor AUTO LOADER (bonus +5)
@@ -205,39 +175,26 @@ class BronzeLoader:
         collection = spec.collection
         checkpoint = self.target.checkpoint_path(collection)
         schema_loc = self.target.schema_path(collection)
-        ingest_mode = spec.ingest_mode or self.al.ingest_mode
         write_mode = self._write_mode(spec)
 
-        reader = (
+        raw = (
             self.spark.readStream.format("cloudFiles")
-            .option("cloudFiles.format", self.al.cloud_files_format)
+            .option("cloudFiles.format", "json")
             .option("cloudFiles.schemaLocation", schema_loc)
+            .option("cloudFiles.inferColumnTypes", "true")
+            .option("cloudFiles.schemaEvolutionMode", "rescue")
+            .option("rescuedDataColumn", "_rescued_data")
             .option("cloudFiles.maxFilesPerTrigger", self.al.max_files_per_trigger)
-            .option("cloudFiles.includeExistingFiles", "true")
+            .load(landing)
+            .withColumn("_source_file", F.col("_metadata.file_path"))
         )
-        if ingest_mode == "single_variant":
-            reader = reader.option("singleVariantColumn", "body_variant") \
-                           .option("cloudFiles.schemaEvolutionMode", "none")
-        else:
-            reader = (
-                reader.option("cloudFiles.inferColumnTypes", "true")
-                .option("cloudFiles.schemaEvolutionMode", self.al.schema_evolution_mode)
-                .option("rescuedDataColumn", self.al.rescued_data_column)
-            )
-            if spec.schema_hints:
-                reader = reader.option("cloudFiles.schemaHints", spec.schema_hints)
-
-        raw = reader.load(landing).withColumn("_source_file", F.col("_metadata.file_path"))
         stats = {"batches": 0}
 
-        def process_batch(batch_df: DataFrame, batch_id: int) -> None:
-            enriched = self._shape_autoloader(batch_df, ingest_mode)
-            enriched = self._add_lineage(
-                enriched, run_id, ingestion_ts, source_path_tag, spec.load_mode,
-            ).persist()
+        def process_batch(bdf: DataFrame, batch_id: int) -> None:
+            enriched = self._shape(bdf, run_id, ingestion_ts, source_path_tag, spec.load_mode).persist()
             try:
-                good = enriched.where(F.col("_source_id").isNotNull() & F.col("body_variant").isNotNull())
-                bad = enriched.where(F.col("_source_id").isNull() | F.col("body_variant").isNull())
+                good = enriched.where(F.col("_source_id").isNotNull())
+                bad = enriched.where(F.col("_source_id").isNull())
                 if write_mode == "merge":
                     self._merge(good, target_table)
                 else:
@@ -267,35 +224,10 @@ class BronzeLoader:
                   collection, written, quar, stats["batches"])
         return LoadResult(collection, written, quar, stats["batches"], checkpoint, schema_loc)
 
-    def _shape_autoloader(self, df: DataFrame, ingest_mode: str) -> DataFrame:
-        rescued_col = self.al.rescued_data_column
-        if ingest_mode == "single_variant":
-            return (
-                df.withColumn("body_json", F.expr("to_json(body_variant)"))
-                .withColumn("_rescued_data", F.lit(None).cast("string"))
-            )
-        control_like = {rescued_col, "_source_file", "_metadata", "_rescued_data"}
-        payload = [c for c in df.columns if c not in control_like]
-        out = (
-            df.withColumn("body_json", F.to_json(F.struct(*[F.col(c) for c in payload])))
-            .withColumn("body_variant", F.expr("try_parse_json(body_json)"))
-        )
-        if rescued_col in df.columns and rescued_col != "_rescued_data":
-            out = out.withColumnRenamed(rescued_col, "_rescued_data")
-        elif "_rescued_data" not in out.columns:
-            out = out.withColumn("_rescued_data", F.lit(None).cast("string"))
-        return out
-
     # ------------------------------------------------------------------ #
-    # Comum
+    # Comum — nenhuma extracao de tipo complexo / VARIANT
     # ------------------------------------------------------------------ #
-    def _write_mode(self, spec: CollectionSpec) -> str:
-        return (
-            self.bronze.write_mode_full if spec.load_mode == "full"
-            else self.bronze.write_mode_incremental
-        )
-
-    def _add_lineage(
+    def _shape(
         self,
         df: DataFrame,
         run_id: str,
@@ -303,37 +235,47 @@ class BronzeLoader:
         source_path_tag: str,
         load_type: str,
     ) -> DataFrame:
+        cols = set(df.columns)
+        payload = [c for c in df.columns if c not in _NON_PAYLOAD]
+
+        body_json = F.to_json(F.struct(*[F.col(c) for c in payload])) if payload else F.lit(None).cast("string")
+        rescued = F.col("_rescued_data").cast("string") if "_rescued_data" in cols else F.lit(None).cast("string")
+        if "_corrupt_record" in cols:
+            rescued = F.coalesce(rescued, F.col("_corrupt_record").cast("string"))
+        source_id = F.col("_id").cast("string") if "_id" in cols else F.lit(None).cast("string")
+        source_file = F.col("_source_file").cast("string") if "_source_file" in cols else F.lit(None).cast("string")
+
         out = (
             df
-            # _id vem serializado como string simples (bson_default). VARIANT usa
-            # sintaxe de path com ':' — colchetes nao funcionam em VARIANT.
-            .withColumn("_source_id", F.expr("body_variant:_id::string"))
+            .withColumn("body_json", body_json)
+            .withColumn("_rescued_data", rescued)
+            .withColumn("_source_id", source_id)
             .withColumn("_source_hash", F.sha2(F.coalesce(F.col("body_json"), F.lit("")), 256))
+            .withColumn("_source_file", source_file)
             .withColumn("_ingestion_id", F.lit(run_id))
             .withColumn("_ingestion_timestamp", F.lit(ingestion_ts).cast("timestamp"))
             .withColumn("_source_path", F.lit(source_path_tag))
             .withColumn("_load_type", F.lit(load_type))
             .withColumn("_ingestion_date", F.lit(ingestion_ts.date()).cast("date"))
         )
-        for col in ("_rescued_data", "_source_file"):
-            if col not in out.columns:
-                out = out.withColumn(col, F.lit(None).cast("string"))
         return out.select(*BRONZE_COLUMNS)
 
+    def _write_mode(self, spec: CollectionSpec) -> str:
+        return (
+            self.bronze.write_mode_full if spec.load_mode == "full"
+            else self.bronze.write_mode_incremental
+        )
+
     def _append(self, df: DataFrame, table: str) -> None:
-        # tabela ja criada particionada pelo DDL -> nao repassa partitionBy
         df.write.format("delta").mode("append").saveAsTable(table)
 
     def _merge(self, df: DataFrame, table: str) -> None:
-        """Upsert por _source_id. Se o MERGE falhar (ex.: VARIANT + updateAll em
-        runtime antigo), cai para overwrite do snapshot completo — idempotente
-        do mesmo jeito para cargas full."""
         from delta.tables import DeltaTable
 
         try:
             (
                 DeltaTable.forName(self.spark, table).alias("t")
-                .merge(df.alias("s"), "t._source_id = s._source_id")
+                .merge(df.dropDuplicates(["_source_id"]).alias("s"), "t._source_id = s._source_id")
                 .whenMatchedUpdateAll()
                 .whenNotMatchedInsertAll()
                 .execute()

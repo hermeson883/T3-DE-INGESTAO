@@ -27,9 +27,10 @@ def bronze_ddl(table_fqn: str, partition_col: str = "_ingestion_date",
                props: dict[str, str] | None = None) -> str:
     """DDL da tabela Bronze — colunas de rastreabilidade (R4) garantidas.
 
-    body_variant : documento inteiro, queryavel (VARIANT)
-    body_json    : documento re-serializado (JSON canonico, lossless)
-    _rescued_data: campos fora do schema (modo inferred) — nunca descartados (R7)
+    body_json    : documento inteiro como veio da origem (STRING JSON) — fidelidade
+                   total, zero parsing na Bronze. A tipagem acontece na Silver.
+    _rescued_data: campos/registros que o reader nao conseguiu interpretar (R7) —
+                   nunca descartados.
     """
     tblprops = ""
     if props:
@@ -38,7 +39,6 @@ def bronze_ddl(table_fqn: str, partition_col: str = "_ingestion_date",
     return f"""
 CREATE TABLE IF NOT EXISTS {table_fqn} (
   _source_id            STRING,
-  body_variant          VARIANT,
   body_json             STRING,
   _rescued_data         STRING,
   _source_hash          STRING,

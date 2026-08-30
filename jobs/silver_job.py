@@ -2,7 +2,7 @@
 # MAGIC %md
 # MAGIC # jobs/silver_job — camada Silver (bonus +4)
 # MAGIC
-# MAGIC Le a Bronze (`body_variant`), deduplica por `_source_id` (latest record) e
+# MAGIC Le a Bronze (`body_json` via get_json_object), deduplica por `_source_id` e
 # MAGIC normaliza:
 # MAGIC - `silver.movies` + `silver.movies_<array>` (explode de cast/genres/directors/...)
 # MAGIC - `silver.comments`, `silver.users`

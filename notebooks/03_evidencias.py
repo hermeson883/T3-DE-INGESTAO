@@ -195,9 +195,10 @@ print("\nOK — execucao 3: apenas os novos entraram, nenhum registro anterior d
 display(
     spark.table(BRONZE_COMMENTS)
     .where(f"_ingestion_id = '{run3}'")
-    .selectExpr("_source_id", "body_variant:name::string AS name",
-                "body_variant:date::string AS date", "_ingestion_id",
-                "_ingestion_timestamp", "_load_type", "_ingestion_date")
+    .selectExpr("_source_id",
+                "get_json_object(body_json, '$.name')  AS name",
+                "get_json_object(body_json, '$.date')  AS date",
+                "_ingestion_id", "_ingestion_timestamp", "_load_type", "_ingestion_date")
 )
 
 # COMMAND ----------
