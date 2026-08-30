@@ -21,7 +21,7 @@ flowchart LR
     subgraph UC["Databricks — Unity Catalog (catálogo mflix)"]
         direction TB
         L["landing.mflix_raw (Volume)\n&lt;collection&gt;/&lt;collection&gt;_&lt;runid&gt;_&lt;ts&gt;.jsonl\n(cópia byte-a-byte da origem)"]
-        A["motor de carga\nbatch: spark.read dos arquivos da execução (padrão)\nautoloader: cloudFiles + checkpoint + schemaLocation (bônus +5)\n-> body_json + body_variant (VARIANT) + _rescued_data"]
+        A["motor de carga\nbatch: spark.read dos arquivos da execução (padrão)\nautoloader: cloudFiles + checkpoint + schemaLocation (bônus +5)\n-> body_json (STRING) + _rescued_data"]
         B[("bronze.&lt;collection&gt; (Delta)\nappend (incremental) | MERGE _source_id (full)\npartição _ingestion_date")]
         QN[("bronze.&lt;collection&gt;_quarentena")]
         C[("bronze.control_ingestion_log")]
@@ -71,9 +71,8 @@ via widget `catalog` / override).
 | Coluna | Origem do valor |
 |---|---|
 | `_source_id` | `_id` do documento (chave de negócio, nunca nula) |
-| `body_variant` | documento inteiro como `VARIANT` (queryável) |
-| `body_json` | documento re-serializado (JSON canônico, lossless) |
-| `_rescued_data` | campos fora do schema no modo `inferred` (R7) — nunca descartados |
+| `body_json` | documento inteiro como `STRING` JSON (lossless) — lido com `get_json_object` / `from_json` |
+| `_rescued_data` | campos que o reader não conseguiu interpretar (R7) — nunca descartados |
 | `_source_hash` | `sha256(body_json)` — auditoria / dedup |
 | `_source_file` | arquivo da landing de onde veio a linha |
 | `_ingestion_id` | UUID da execução (run id) |
@@ -132,19 +131,24 @@ Risco residual documentado: se o extract grava o arquivo e falha ANTES de
 
 **Tratamento de schema drift (R7)**
 ```
-Decisão: modo padrão single_variant — body_json (linha crua) + body_variant
-         (VARIANT). Schema drift é estruturalmente impossível (VARIANT acomoda
-         qualquer forma). Modo alternativo inferred: leitura com schema inferido +
-         coluna de rescue (`columnNameOfCorruptRecord`/`rescuedDataColumn`) —
-         campo divergente/registro malformado vai para _rescued_data, nunca quebra.
+Decisão: o documento inteiro vive numa única coluna body_json STRING. O schema da
+         Bronze é fixo (10 colunas, todas STRING/TIMESTAMP/DATE) e NUNCA muda —
+         schema drift na origem é estruturalmente impossível de quebrar a carga,
+         porque o destino é texto. A leitura usa PERMISSIVE +
+         columnNameOfCorruptRecord; o que o reader não interpreta vai para
+         _rescued_data (no motor autoloader, rescuedDataColumn +
+         schemaEvolutionMode=rescue), nunca é descartado.
 Justificativa: NoSQL schemaless — travar um StructType na Bronze geraria
-         reprocessamento a cada campo novo. VARIANT + _rescued_data preserva
-         100% do documento e empurra a tipagem para a Silver.
+         reprocessamento a cada campo novo. VARIANT foi avaliado e descartado:
+         o CREATE TABLE funciona, mas a LEITURA (`body_variant:campo` e
+         `body_variant['campo']`) falha com [INVALID_EXTRACT_BASE_FIELD_TYPE] no
+         runtime Serverless usado — STRING é universalmente legível e igualmente
+         lossless.
 Registros irrecuperáveis: linha sem _id ou JSON inválido -> tabela
          <collection>_quarentena (contada em qtd_quarentena no control log),
          nunca descartada em silêncio.
-Impacto na Silver: a Silver lê body_variant com try_cast por campo; campos
-         em _rescued_data podem ser promovidos explicitamente quando
+Impacto na Silver: a Silver tipa com get_json_object / from_json campo a campo;
+         campos em _rescued_data podem ser promovidos explicitamente quando
          estabilizarem.
 ```
 

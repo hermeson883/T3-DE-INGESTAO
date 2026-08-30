@@ -61,7 +61,7 @@ results = []
 for spec in cfg.resolve_collections(COLLECTIONS):
     rec = ControlRecord(ingestion_id=run_id, collection=spec.collection,
                         load_type=spec.load_mode,
-                        ingest_mode=spec.ingest_mode or cfg.autoloader.ingest_mode,
+                        ingest_mode=cfg.autoloader.engine,
                         pipeline_version=__version__)
     try:
         ld = loader.load(spec, run_id, ts, cfg.source.source_path_tag)

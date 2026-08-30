@@ -15,7 +15,7 @@ from .rules import mongo_projection
 from .utils import coerce_scalar_list
 
 _VALID_MODES = {"full", "incremental"}
-_VALID_INGEST = {"single_variant", "inferred"}
+_VALID_ENGINES = {"batch", "autoloader"}
 
 
 # --------------------------------------------------------------------------- #
@@ -99,12 +99,18 @@ class TargetConfig:
 @dataclass(frozen=True)
 class AutoloaderConfig:
     engine: str = "batch"               # "batch" (padrao) | "autoloader"
-    ingest_mode: str = "single_variant"
     cloud_files_format: str = "json"
     schema_evolution_mode: str = "rescue"
     rescued_data_column: str = "_rescued_data"
     max_files_per_trigger: int = 200
     trigger: str = "availableNow"
+
+    def __post_init__(self) -> None:
+        if self.engine not in _VALID_ENGINES:
+            raise ValueError(
+                f"autoloader.engine invalido: {self.engine!r} "
+                f"(esperado: {sorted(_VALID_ENGINES)})"
+            )
 
 
 @dataclass(frozen=True)
@@ -148,7 +154,6 @@ class CollectionSpec:
     allow_empty: bool = False
     reconciliation_threshold_pct: float | None = None
     schema_hints: str | None = None
-    ingest_mode: str | None = None
     notes: str = ""
 
     def __post_init__(self) -> None:
@@ -160,10 +165,6 @@ class CollectionSpec:
         if self.load_mode == "incremental" and not self.watermark_field:
             raise ValueError(
                 f"[{self.collection}] modo_carga=incremental exige campo_watermark"
-            )
-        if self.ingest_mode is not None and self.ingest_mode not in _VALID_INGEST:
-            raise ValueError(
-                f"[{self.collection}] ingest_mode invalido: {self.ingest_mode!r}"
             )
         if self.batch_size <= 0:
             raise ValueError(f"[{self.collection}] batch_size deve ser > 0")
@@ -194,7 +195,6 @@ class CollectionSpec:
             allow_empty=bool(raw.get("allow_empty", False)),
             reconciliation_threshold_pct=_opt_float(raw.get("reconciliation_threshold_pct")),
             schema_hints=raw.get("schema_hints"),
-            ingest_mode=raw.get("ingest_mode"),
             notes=raw.get("notes", ""),
         )
 
@@ -277,7 +277,6 @@ class PipelineConfig:
         al = cfg.get("autoloader", {})
         autoloader = AutoloaderConfig(
             engine=overrides.get("engine") or al.get("engine", "batch"),
-            ingest_mode=overrides.get("ingest_mode") or al.get("ingest_mode", "single_variant"),
             cloud_files_format=al.get("cloud_files_format", "json"),
             schema_evolution_mode=al.get("schema_evolution_mode", "rescue"),
             rescued_data_column=al.get("rescued_data_column", "_rescued_data"),

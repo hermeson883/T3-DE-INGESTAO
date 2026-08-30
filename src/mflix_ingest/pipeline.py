@@ -98,7 +98,7 @@ def run_pipeline(
                 ingestion_id=run_id,
                 collection=spec.collection,
                 load_type=spec.effective_load_type(force_full),
-                ingest_mode=spec.ingest_mode or cfg.autoloader.ingest_mode,
+                ingest_mode=cfg.autoloader.engine,
                 pipeline_version=__version__,
             )
             try:

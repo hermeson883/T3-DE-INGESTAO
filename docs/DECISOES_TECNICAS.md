@@ -41,27 +41,41 @@ gera um UUID novo), poderia reprocessar. Mitigado por `MERGE`/watermark.
 
 ---
 
-## D2. `VARIANT` (`single_variant`) como forma canônica da Bronze
+## D2. Documento inteiro em `body_json STRING` como forma canônica da Bronze
 
-**Escolha:** cada documento é ingerido numa única coluna `body_variant VARIANT`;
-`body_json` é o `to_json(body_variant)`; `_rescued_data` reservada para o modo
-`inferred`.
+**Escolha:** cada documento é ingerido numa única coluna `body_json STRING`
+(JSON do documento completo). `_rescued_data` guarda o que o reader não
+interpretou. A Bronze tem 10 colunas fixas, só `STRING`/`TIMESTAMP`/`DATE`.
 
 **Por quê:**
 - `sample_mflix` é deliberadamente heterogêneo (`imdb`/`tomatoes`/`awards`
   ausentes, `year` às vezes texto). Um `StructType` fixo na Bronze exigiria
   `mergeSchema` + reprocessamento a cada variação.
-- `VARIANT` é queryável (`body_variant:imdb:rating::double`) sem pagar o custo de
-  achatar tudo na ingestão.
+- Sendo texto, o schema da Bronze **nunca muda** — nenhuma evolução da origem é
+  capaz de quebrar a carga (R7).
 - Fidelidade: nenhum campo é perdido, nenhum é renomeado (R6).
+- A tipagem acontece na Silver, com `get_json_object` / `from_json` campo a
+  campo — onde o custo de um campo novo é uma linha de código, não um
+  reprocessamento da Bronze.
 
-**Alternativa suportada (`inferred`):** Auto Loader infere o schema, persiste em
-`schemaLocation`, e `schemaEvolutionMode=rescue` joga campo novo/divergente em
-`_rescued_data`. Útil se o avaliador quiser ver colunas tipadas já na Bronze.
-Troca-se fidelidade estrutural por conveniência.
+**`VARIANT` foi avaliado e descartado.** Era a escolha inicial (`body_variant
+VARIANT` ao lado do `body_json`) e é o tipo "certo" no papel: queryável via
+`body_variant:imdb:rating::double`, sem achatar nada na ingestão. Na prática, no
+Serverless deste workspace o `CREATE TABLE ... VARIANT` funciona mas **qualquer
+leitura falha**:
 
-**Requisito:** `VARIANT` GA exige DBR 15.3+ / Serverless recente (o repo original
-já usa `parse_json`/`schema_of_json_agg`, então o workspace suporta).
+```
+[INVALID_EXTRACT_BASE_FIELD_TYPE] Can't extract a value from "body_variant".
+Need a complex type [STRUCT, ARRAY, MAP] but got "VARIANT". SQLSTATE: 42000
+```
+
+— tanto na sintaxe de dois-pontos (`body_variant:_id`) quanto na de colchetes
+(`body_variant['_id']`). `STRING` é universalmente legível, igualmente lossless,
+e `get_json_object` roda em qualquer runtime. Trocamos açúcar sintático por uma
+pipeline que executa.
+
+**Requisito resultante:** nenhum tipo exótico — a Bronze roda em qualquer
+DBR 14.3 LTS+ com Unity Catalog.
 
 ---
 

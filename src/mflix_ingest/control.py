@@ -73,7 +73,7 @@ CONTROL_SCHEMA = T.StructType([
     T.StructField("divergencia_pct", T.DoubleType()),
     T.StructField("contrato_ok", T.BooleanType()),
     T.StructField("landing_files", T.ArrayType(T.StringType())),
-    T.StructField("ingest_mode", T.StringType()),
+    T.StructField("ingest_mode", T.StringType()),   # motor de carga: batch | autoloader
     T.StructField("pipeline_version", T.StringType()),
 ])
 
@@ -118,7 +118,7 @@ class ControlRecord:
     divergencia_pct: float = 0.0
     contrato_ok: bool = True
     landing_files: list[str] = field(default_factory=list)
-    ingest_mode: str = "single_variant"
+    ingest_mode: str = "batch"          # motor de carga usado nesta execucao
     pipeline_version: str = ""
 
     def finish(self, status: str, **updates: Any) -> "ControlRecord":

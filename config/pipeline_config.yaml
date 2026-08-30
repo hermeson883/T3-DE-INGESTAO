@@ -52,12 +52,10 @@ autoloader:
   #                 + trigger(availableNow). Bonus +5 (ingestao orientada a arquivos).
   #                 Use no jobs/bronze_job para reprocessamento / demonstracao.
   engine: batch
-  # single_variant  -> cada documento numa unica coluna VARIANT (DBR 15.3+/Serverless).
-  #                    Schema drift estruturalmente impossivel. body_json byte-a-byte.
-  # inferred        -> schema inferido de cada arquivo; campos divergentes -> _rescued_data.
-  ingest_mode: single_variant
+  # O documento inteiro e gravado em body_json STRING nos dois motores — o schema
+  # da Bronze e fixo, entao schema drift na origem nunca quebra a carga (R7).
   cloud_files_format: json
-  schema_evolution_mode: rescue     # usado somente no modo inferred
+  schema_evolution_mode: rescue     # campo novo/divergente -> _rescued_data
   rescued_data_column: _rescued_data
   max_files_per_trigger: 200
   trigger: availableNow             # job em lote (nao streaming continuo)

@@ -269,21 +269,30 @@ class BronzeLoader:
         df.write.format("delta").mode("append").saveAsTable(table)
 
     def _merge(self, df: DataFrame, table: str) -> None:
+        """MERGE por _source_id com mapeamento EXPLICITO de colunas.
+
+        `whenMatchedUpdateAll()` expandiria `*` pelas colunas do ALVO — se a tabela
+        tiver colunas legadas que a origem nao tem (ex.: um `body_variant` de uma
+        versao anterior do DDL), o Delta nao resolve e o MERGE quebra. Listando
+        BRONZE_COLUMNS explicitamente, colunas extras do alvo sao ignoradas.
+        """
         from delta.tables import DeltaTable
 
+        src = df.dropDuplicates(["_source_id"])
+        assign = {c: F.col(f"s.{c}") for c in BRONZE_COLUMNS}
         try:
             (
                 DeltaTable.forName(self.spark, table).alias("t")
-                .merge(df.dropDuplicates(["_source_id"]).alias("s"), "t._source_id = s._source_id")
-                .whenMatchedUpdateAll()
-                .whenNotMatchedInsertAll()
+                .merge(src.alias("s"), "t._source_id = s._source_id")
+                .whenMatchedUpdate(set=assign)
+                .whenNotMatchedInsert(values=assign)
                 .execute()
             )
         except Exception as exc:  # noqa: BLE001
-            _log.warning("MERGE em %s falhou (%s) — fallback: overwrite snapshot", table, exc)
+            _log.warning("MERGE em %s falhou (%s: %s) — fallback: overwrite snapshot",
+                         table, type(exc).__name__, str(exc).split("\n", 1)[0])
             (
-                df.dropDuplicates(["_source_id"])
-                .write.format("delta").mode("overwrite")
+                src.write.format("delta").mode("overwrite")
                 .option("overwriteSchema", "false")
                 .saveAsTable(table)
             )
