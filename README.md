@@ -19,7 +19,7 @@ MongoDB sample_mflix
    ▼
 landing.mflix_raw  (Volume)   <collection>/<collection>_<run_id>_<ts>.jsonl   ── cópia byte-a-byte da origem (R6)
    ▼  motor de carga (config autoloader.engine):
-   │    batch (padrão) ── spark.read dos arquivos DA execução · VARIANT · rápido, sem streaming
+   │    batch (padrão) ── spark.read dos arquivos DA execução · rápido, sem streaming
    │    autoloader     ── readStream cloudFiles · checkpoint · schemaLocation persistido  (bônus +5, via bronze_job)
 bronze.<collection>  (Delta)   append (incremental) | MERGE _source_id (full) · partição _ingestion_date
    ├── bronze.<collection>_quarentena        registros inválidos (R7)
@@ -79,7 +79,8 @@ CONTRIBUICOES.md
 ### Pré-requisitos
 - Workspace Databricks com **Unity Catalog** e permissão de `CREATE CATALOG`
   (ou um catálogo já existente — passe o nome no widget `catalog`).
-- **Serverless** ou **DBR 15.4 LTS+** (precisa de `VARIANT` / `parse_json`).
+- **Serverless** ou **DBR 14.3 LTS+** (Delta + Unity Catalog; nenhum tipo exótico —
+  a Bronze usa só `STRING`/`TIMESTAMP`/`DATE`).
 - Acesso de rede ao MongoDB de origem.
 
 ### Passo a passo
@@ -126,7 +127,7 @@ Toda a demais configuração está em `config/` — **nada hardcoded** (R1).
 | **R3** | Full + incremental com watermark persistida + idempotência | `full` (users/theaters/sessions/embedded_movies) via MERGE por `_source_id`; `incremental` (comments/movies) via append + `bronze.ingestion_watermark`. O motor `batch` lê só o arquivo `.jsonl` **daquela execução** (`<run_id>` no nome) → re-run não reprocessa; ver [DECISOES D3/D4](docs/DECISOES_TECNICAS.md) |
 | **R4** | Colunas de rastreabilidade em toda Bronze | `_ingestion_id`, `_ingestion_timestamp`, `_source_path`, `_load_type`, `_ingestion_date` (+ `_source_id`, `body_json`, `_rescued_data`, `_source_hash`, `_source_file`) — DDL em `control.bronze_ddl` |
 | **R5** | `control_ingestion_log` | `bronze.control_ingestion_log`, escrita a cada execução por `control.ControlManager.log_run`; schema com todos os campos pedidos + extras |
-| **R6** | Bronze Delta, append-only, fiel à origem, particionada, nomenclatura | Delta particionada por `_ingestion_date`; documento preservado em `body_variant`/`body_json`; arquivo JSONL imutável na landing; padrão `catalog.schema.tabela` |
+| **R6** | Bronze Delta, append-only, fiel à origem, particionada, nomenclatura | Delta particionada por `_ingestion_date`; documento preservado integralmente em `body_json` (STRING); arquivo JSONL imutável na landing; padrão `catalog.schema.tabela` |
 | **R7** | Schema drift + registros inválidos | Bronze guarda o documento como **STRING JSON** (`body_json`) — schema drift é um não-problema (é só texto); campos/registros que o reader não interpreta → `_rescued_data`; sem `_source_id` → `<collection>_quarentena`. Tipagem só na Silver (`from_json`). Ver [DECISOES D2](docs/DECISOES_TECNICAS.md) |
 | **R8** | Reconciliação e qualidade + limiar documentado | `quality.Reconciler`: origem×destino (execução e acumulada), % nulos na chave, duplicidade no lote; limiares em `collections.json` / [ARQUITETURA §4](docs/ARQUITETURA.md#4-reconciliação-r8--limiares) |
 
