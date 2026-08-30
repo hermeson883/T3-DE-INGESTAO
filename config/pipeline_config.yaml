@@ -1,0 +1,89 @@
+# =============================================================================
+# Configuracao GLOBAL da pipeline de ingestao — sample_mflix -> Bronze
+# NUNCA coloque credenciais aqui. A URI do MongoDB vive em Databricks Secrets
+# (scope/key abaixo). Ver notebooks/00_setup_secrets.
+# Parametros por colecao ficam em config/collections.json.
+# =============================================================================
+
+source:
+  type: mongodb
+  database: sample_mflix
+  # Tag gravada na coluna de linhagem _source_path (R4). Exemplo do enunciado.
+  source_path_tag: mongodb_atlas
+  # Databricks Secret que guarda a connection string completa do MongoDB.
+  secret_scope: conn-db
+  secret_key: cnn-mongodb-sampleflix
+  app_name: databricks-mflix-ingest
+  # Timeouts do driver (ms) — conexao reaproveitada entre colecoes (R2: pooling).
+  server_selection_timeout_ms: 15000
+  connect_timeout_ms: 20000
+  socket_timeout_ms: 300000
+  max_pool_size: 20
+  # Retry com backoff exponencial + jitter em falhas de rede da origem (R2).
+  retry:
+    max_attempts: 4
+    base_delay_seconds: 2.0
+    max_delay_seconds: 30.0
+
+target:
+  catalog: mflix
+  landing_schema: landing
+  landing_volume: mflix_raw
+  bronze_schema: bronze
+  silver_schema: silver
+  control_table: control_ingestion_log        # -> mflix.bronze.control_ingestion_log (R5)
+  watermark_table: ingestion_watermark        # -> mflix.bronze.ingestion_watermark
+  contract_violations_table: data_contract_violations
+  # Subpastas operacionais dentro do Volume da landing.
+  checkpoints_dir: _checkpoints
+  schemas_dir: _schemas
+  badrecords_dir: _badrecords
+
+landing:
+  # 1 arquivo JSON Lines (um documento por linha) por colecao por execucao.
+  file_format: jsonl
+  files_per_run: 1
+
+autoloader:
+  # single_variant  -> ingere cada documento numa unica coluna VARIANT (DBR 15.3+/Serverless).
+  #                    Schema drift e estruturalmente impossivel. RECOMENDADO.
+  # inferred        -> Auto Loader infere e PERSISTE o schema em schemaLocation,
+  #                    schemaEvolutionMode=rescue joga campos novos/divergentes em _rescued_data.
+  ingest_mode: single_variant
+  cloud_files_format: json
+  schema_evolution_mode: rescue     # usado somente no modo inferred
+  rescued_data_column: _rescued_data
+  max_files_per_trigger: 200
+  trigger: availableNow             # job em lote (nao streaming continuo)
+
+bronze:
+  write_mode_full: merge            # colecoes full -> MERGE por _source_id (idempotente)
+  write_mode_incremental: append    # colecoes incrementais -> append + watermark
+  partition_by: _ingestion_date
+  table_properties:
+    delta.autoOptimize.optimizeWrite: "true"
+    delta.autoOptimize.autoCompact: "true"
+
+reconciliation:
+  # divergencia_pct = |contagem_origem - qtd_gravada| / contagem_origem * 100
+  default_threshold_pct: 1.0        # acima disso -> status PARTIAL
+  hard_fail_pct: 5.0               # shortfall acima disso -> status FAILED (perda sistemica)
+  null_key_is_fatal: true          # _source_id nulo -> FAILED (R8)
+  fail_job_on_partial: false       # PARTIAL nao derruba o Job; FAILED sim
+
+silver:
+  enabled: true
+  movies_arrays: [cast, genres, directors, writers, countries, languages]
+
+contract:
+  path: config/data_contract.yaml
+  sample_size: 80                  # docs amostrados da origem para validar o contrato
+
+orchestration:
+  job_name: mflix-ingestao-moderna
+  max_retries: 2
+  min_retry_interval_millis: 60000
+  retry_on_timeout: true
+  timeout_seconds: 7200
+  # Preencha no notebook 05 (widget) — nao versione e-mails pessoais se nao quiser.
+  on_failure_emails: []

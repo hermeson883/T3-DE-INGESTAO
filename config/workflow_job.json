@@ -1,0 +1,62 @@
+{
+  "_comment": "Definicao de referencia do Job de orquestracao (bonus +4). Gerada/atualizada por notebooks/05_create_workflow (que substitui <REPO> pelo caminho real do Git Folder e aplica o e-mail de notificacao). Sem credenciais.",
+  "name": "mflix-ingestao-moderna",
+  "max_concurrent_runs": 1,
+  "timeout_seconds": 7200,
+  "tags": { "projeto": "t3-de-ingestao", "camada": "bronze" },
+  "parameters": [
+    { "name": "catalog", "default": "mflix" },
+    { "name": "collections", "default": "all" },
+    { "name": "force_full", "default": "false" }
+  ],
+  "tasks": [
+    {
+      "task_key": "setup_catalog",
+      "notebook_task": {
+        "notebook_path": "<REPO>/notebooks/01_setup_catalog",
+        "base_parameters": { "catalog": "{{job.parameters.catalog}}" }
+      }
+    },
+    {
+      "task_key": "ingestao",
+      "depends_on": [ { "task_key": "setup_catalog" } ],
+      "notebook_task": {
+        "notebook_path": "<REPO>/jobs/ingestion_job",
+        "base_parameters": {
+          "catalog": "{{job.parameters.catalog}}",
+          "collections": "{{job.parameters.collections}}",
+          "force_full": "{{job.parameters.force_full}}"
+        }
+      },
+      "max_retries": 2,
+      "min_retry_interval_millis": 60000,
+      "retry_on_timeout": true
+    },
+    {
+      "task_key": "silver",
+      "depends_on": [ { "task_key": "ingestao" } ],
+      "notebook_task": {
+        "notebook_path": "<REPO>/jobs/silver_job",
+        "base_parameters": { "catalog": "{{job.parameters.catalog}}" }
+      },
+      "max_retries": 1
+    },
+    {
+      "task_key": "reconciliacao",
+      "depends_on": [ { "task_key": "silver" } ],
+      "notebook_task": {
+        "notebook_path": "<REPO>/notebooks/04_dashboard",
+        "base_parameters": { "catalog": "{{job.parameters.catalog}}" }
+      }
+    }
+  ],
+  "schedule": {
+    "quartz_cron_expression": "0 0 6 * * ?",
+    "timezone_id": "America/Sao_Paulo",
+    "pause_status": "PAUSED"
+  },
+  "email_notifications": {
+    "on_failure": [],
+    "no_alert_for_skipped_runs": true
+  }
+}

@@ -1,0 +1,74 @@
+# =============================================================================
+# DATA CONTRACT da origem (sample_mflix) — bonus +3
+# Contrato formal validado a cada execucao contra uma amostra da origem
+# (mflix_ingest.contract.validate_contract). Violacoes sao gravadas em
+# mflix.bronze.data_contract_violations e rebaixam o status para PARTIAL.
+#
+# type: string | int | double | number | bool | datetime | objectid | array | object
+# required: campo deve existir e ser nao-nulo na amostra
+# nullable: aceita null (mas a chave deve existir)
+# forbidden: campo NAO pode aparecer na Bronze (removido na projection)
+# =============================================================================
+
+version: 1
+database: sample_mflix
+
+defaults:
+  # % maximo de docs da amostra que podem violar um campo "required" sem falhar
+  max_violation_pct: 5.0
+
+collections:
+
+  movies:
+    key: _id
+    fields:
+      _id:        { type: objectid, required: true }
+      title:      { type: string,   required: true }
+      year:       { type: number,   nullable: true }
+      genres:     { type: array,    nullable: true }
+      cast:       { type: array,    nullable: true }
+      imdb:       { type: object,   nullable: true }
+      lastupdated: { type: string,  nullable: true }
+    forbidden: [fullplot, poster]
+
+  comments:
+    key: _id
+    fields:
+      _id:      { type: objectid, required: true }
+      name:     { type: string,   required: true }
+      email:    { type: string,   required: true }
+      movie_id: { type: objectid, required: true }
+      text:     { type: string,   nullable: true }
+      date:     { type: datetime, required: true }
+    forbidden: []
+
+  users:
+    key: _id
+    fields:
+      _id:   { type: objectid, required: true }
+      name:  { type: string,   required: true }
+      email: { type: string,   required: true }
+    forbidden: [password]
+
+  theaters:
+    key: _id
+    fields:
+      _id:       { type: objectid, required: true }
+      theaterId: { type: number,   required: true }
+      location:  { type: object,   required: true }
+    forbidden: []
+
+  sessions:
+    key: _id
+    allow_empty: true
+    fields:
+      _id:     { type: objectid, required: true }
+      user_id: { type: string,   nullable: true }
+    forbidden: [jwt]
+
+  embedded_movies:
+    key: _id
+    fields:
+      _id:   { type: objectid, required: true }
+      title: { type: string,   required: true }
+    forbidden: [plot_embedding]

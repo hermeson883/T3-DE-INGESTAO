@@ -1,0 +1,72 @@
+{
+  "_comment": "Parametros por colecao. modo_carga: full | incremental. campo_watermark obrigatorio quando incremental. projection_exclude = campos removidos NA ORIGEM (pushdown/projection, R2) — sensiveis ou muito largos. reconciliation_threshold_pct sobrescreve o default global.",
+
+  "movies": {
+    "collection": "movies",
+    "modo_carga": "incremental",
+    "campo_watermark": "lastupdated",
+    "watermark_type": "string",
+    "projection_exclude": ["fullplot", "poster"],
+    "batch_size": 2000,
+    "expected_count_min": 20000,
+    "reconciliation_threshold_pct": 1.0,
+    "notes": "lastupdated e STRING 'YYYY-MM-DD HH:MM:SS.nnnnnnnnn' — comparacao lexicografica valida para largura fixa. Docs sem lastupdated entram apenas na 1a carga (full). fullplot/poster excluidos por serem campos largos sem valor analitico na Bronze."
+  },
+
+  "comments": {
+    "collection": "comments",
+    "modo_carga": "incremental",
+    "campo_watermark": "date",
+    "watermark_type": "timestamp",
+    "projection_exclude": [],
+    "batch_size": 5000,
+    "expected_count_min": 40000,
+    "reconciliation_threshold_pct": 0.5,
+    "notes": "date e ISODate nativo — carga incremental direta e confiavel. Colecao usada nas 3 evidencias obrigatorias."
+  },
+
+  "users": {
+    "collection": "users",
+    "modo_carga": "full",
+    "campo_watermark": null,
+    "projection_exclude": ["password"],
+    "batch_size": 1000,
+    "expected_count_min": 100,
+    "reconciliation_threshold_pct": 0.0,
+    "notes": "Dimensao pequena e estavel. password (hash bcrypt) REMOVIDO na projection — sem valor analitico e sensivel."
+  },
+
+  "theaters": {
+    "collection": "theaters",
+    "modo_carga": "full",
+    "campo_watermark": null,
+    "projection_exclude": [],
+    "batch_size": 1000,
+    "expected_count_min": 1000,
+    "reconciliation_threshold_pct": 0.0,
+    "notes": "GeoJSON aninhado (location.geo.coordinates = array de floats) — preservado integro dentro do VARIANT."
+  },
+
+  "sessions": {
+    "collection": "sessions",
+    "modo_carga": "full",
+    "campo_watermark": null,
+    "projection_exclude": ["jwt"],
+    "batch_size": 1000,
+    "expected_count_min": 0,
+    "allow_empty": true,
+    "reconciliation_threshold_pct": 0.0,
+    "notes": "Pode estar vazia. allow_empty=true -> count=0 gera log SUCCESS com qtd_lida_origem=0, sem levantar excecao. jwt (token ativo) REMOVIDO na projection."
+  },
+
+  "embedded_movies": {
+    "collection": "embedded_movies",
+    "modo_carga": "full",
+    "campo_watermark": null,
+    "projection_exclude": ["plot_embedding"],
+    "batch_size": 500,
+    "expected_count_min": 3000,
+    "reconciliation_threshold_pct": 0.0,
+    "notes": "plot_embedding = vetor de ~1536 floats (~12KB/doc, ~42MB total). REMOVIDO na projection obrigatoriamente (R2 — controle de memoria). batch_size menor por documento largo."
+  }
+}

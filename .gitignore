@@ -1,0 +1,38 @@
+# --- Segredos / credenciais (NUNCA versionar) ---
+.env
+.env.*
+*.secret
+secrets.json
+config/*.local.*
+**/mongo_uri*.txt
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# --- Databricks / Spark (artefatos locais) ---
+.databricks/
+spark-warehouse/
+metastore_db/
+derby.log
+*.log
+
+# --- Checkpoints / schema locations do Auto Loader (se sincronizados por engano) ---
+_checkpoints/
+_schemas/
+_badrecords/
+
+# --- IDE / SO ---
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

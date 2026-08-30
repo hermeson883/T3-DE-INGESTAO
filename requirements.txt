@@ -1,0 +1,5 @@
+# Dependencias de runtime da pipeline.
+# No Databricks Serverless / DBR 15.4 LTS+ o pyspark e o delta ja vem instalados;
+# instale apenas o que falta a partir do notebook 00/02 ou como library do Job.
+pymongo>=4.6
+pyyaml>=6.0
